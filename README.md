@@ -42,9 +42,8 @@ Required:
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
 ```
 
-The script does not load `.env` by itself. When running with PM2, either export
-environment variables before `npm start`, inject them through your deployment
-system, or use PM2's environment management.
+The script loads `.env` automatically through `dotenv`. Values provided by the
+real process environment still take precedence.
 
 ## Run
 

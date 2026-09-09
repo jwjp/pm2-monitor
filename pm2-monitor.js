@@ -6,6 +6,7 @@
  * endpoint for lightweight health dashboards.
  */
 
+import 'dotenv/config';
 import { execFile as callbackExecFile } from 'child_process';
 import { promisify } from 'util';
 import cron from 'node-cron';
@@ -168,16 +169,16 @@ async function checkStableProcesses(processes, restartedApps) {
     console.log(`[Check] ${name}(${pm_id}): Status(${status}), CPU(${cpu}%), Memory(${memory}MB)`);
 
     if (status !== 'online') {
-      await sendSlackNotification(name, 'Process Status Alert', `Instance \`${pm_id}\` has status \`${status}\`.`, 'danger');
+      await sendSlackNotification(name, 'Process Status Alert', `Instance \`${pm_id}\` has status \`${status}\`.`, 'danger', `${name}::status::${pm_id}::${status}`);
       continue;
     }
 
     if (cpu > CONFIG.THRESHOLDS.CPU) {
-      await sendSlackNotification(name, 'High CPU Usage', `Instance \`${pm_id}\` is using \`${cpu}%\` CPU.`, 'warning');
+      await sendSlackNotification(name, 'High CPU Usage', `Instance \`${pm_id}\` is using \`${cpu}%\` CPU.`, 'warning', `${name}::cpu::${pm_id}`);
     }
 
     if (memory > CONFIG.THRESHOLDS.MEMORY) {
-      await sendSlackNotification(name, 'High Memory Usage', `Instance \`${pm_id}\` is using \`${memory}MB\` of memory.`, 'warning');
+      await sendSlackNotification(name, 'High Memory Usage', `Instance \`${pm_id}\` is using \`${memory}MB\` of memory.`, 'warning', `${name}::memory::${pm_id}`);
     }
   }
 }
@@ -229,10 +230,9 @@ function execOptions() {
   };
 }
 
-async function sendSlackNotification(appName, title, message, color = 'danger') {
-  const key = `${appName}::${title}::${message}`;
+async function sendSlackNotification(appName, title, message, color = 'danger', throttleKey = `${appName}::${title}`) {
   const now = Date.now();
-  const lastSentAt = notificationThrottleCache.get(key);
+  const lastSentAt = notificationThrottleCache.get(throttleKey);
 
   if (lastSentAt && now - lastSentAt < CONFIG.THROTTLE_DURATION_MS) {
     return;
@@ -245,7 +245,7 @@ async function sendSlackNotification(appName, title, message, color = 'danger') 
       timeout: CONFIG.SLACK_TIMEOUT_MS,
       validateStatus: (status) => status >= 200 && status < 300,
     });
-    notificationThrottleCache.set(key, now);
+    notificationThrottleCache.set(throttleKey, now);
   } catch (error) {
     console.error(`[Error] Failed to send Slack notification: ${error.message}`);
   }

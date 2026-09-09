@@ -7,10 +7,8 @@ module.exports = {
     time: true,
     env: {
       PORT: 3031,
-      HOST: "0.0.0.0",
-      // ⚠️ Set your Slack webhook URL here, 
-      // Set it in your server's environment or a .env file.
-      SLACK_WEBHOOK_URL: "YOUR_SLACK_WEBHOOK_URL_HERE"
+      HOST: '127.0.0.1',
+      WEB_ENABLED: 'true'
     },
   }]
 };

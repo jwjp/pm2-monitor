@@ -1,110 +1,115 @@
 # PM2 Slack Monitor
 
-An advanced monitoring script for PM2 that sends real-time alerts to Slack for process restarts, status changes, and high resource usage (CPU/Memory).
+A small Node.js monitor for PM2-managed services. It checks process status,
+restart counts, CPU, and memory usage, then sends Slack alerts when something
+needs attention.
 
-It intelligently handles clustered apps, throttles notifications to prevent spam, and provides an optional web endpoint to view status history.
+## Features
 
----
+- Restart detection with follow-up polling until the app stabilizes or times out.
+- Cluster-aware restart handling by grouping PM2 instances with the same app name.
+- CPU and memory threshold alerts.
+- Throttled Slack notifications to avoid repeated identical alerts.
+- Optional local `/status` JSON endpoint with status history.
+- Environment-driven configuration for production use.
 
-## ✨ Features
+## Requirements
 
--   **Intelligent Restart Polling**: When a restart is detected, the script polls the app until it's stable (`online`) or times out, giving a definitive success/failure notification.
--   **Resource Threshold Alerts**: Get warnings for high CPU and Memory usage based on configurable thresholds.
--   **Cluster-Aware Notifications**: Groups restart notifications for clustered apps into a single event.
--   **Alert Throttling**: Prevents spam by suppressing identical notifications for a configurable duration.
--   **Configurable Cron Schedule**: Define exactly when the monitoring script should run (e.g., only during business hours).
--   **Optional Web UI**: A simple HTTP endpoint (`/status`) to view the recent history of process statuses as a JSON object.
+- Node.js 18 or later
+- PM2 installed and available on `PATH`
+- A Slack Incoming Webhook URL
 
----
+## Install
 
-## 🛠️ Setup & Installation
+```bash
+git clone git@github.com:jwjp/pm2-monitor.git
+cd pm2-monitor
+npm install
+```
 
-### Prerequisites
+## Configure
 
--   [Node.js](https://nodejs.org/) (v14 or later recommended)
--   [PM2](https://pm2.keymetrics.io/) installed globally (`npm install -g pm2`)
--   A Slack Incoming Webhook URL. You can create one [here](https://api.slack.com/messaging/webhooks).
+Create a real environment file from the example, or set equivalent variables in
+your shell, service manager, or PM2 environment.
 
-### Installation Steps
+```bash
+cp .env.example .env
+```
 
-1.  **Clone the repository:**
-    ```bash
-    git clone git@github.com:jiwonio/pm2-monitor.git
-    cd pm2-monitor
-    ```
+Required:
 
-2.  **Install dependencies:**
-    ```bash
-    npm install
-    ```
+```env
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+```
 
-3.  **Set up Environment Variables:**
-    The script requires your Slack Webhook URL. **For security reasons, do not hardcode this in any file.**
+The script does not load `.env` by itself. When running with PM2, either export
+environment variables before `npm start`, inject them through your deployment
+system, or use PM2's environment management.
 
-    Create a `.env` file in the root directory and add your webhook URL:
-    ```env
-    # .env
-    SLACK_WEBHOOK_URL='[https://hooks.slack.com/services/YOUR/WEBHOOK/URL](https://hooks.slack.com/services/YOUR/WEBHOOK/URL)'
-    ```
-    PM2 will automatically load variables from this file if you install `dotenv`. Alternatively, you can set it as a system environment variable.
+## Run
 
----
+```bash
+npm start
+```
 
-## ⚙️ Configuration
+Useful commands:
 
-You can customize the monitor's behavior by editing the `CONFIG` object at the top of the `pm2-monitor.js` script.
+```bash
+npm run logs
+npm run restart
+npm run stop
+npm run check
+npm run audit
+```
 
-| Key                  | Description                                                                 | Default                       |
-| -------------------- | --------------------------------------------------------------------------- | ----------------------------- |
-| `CRON_SCHEDULE`      | The schedule for when to run the check. Uses `node-cron` format.            | `'*/1 8-19 * * 1-5'`          |
-| `EXCLUDED_APPS`      | An array of PM2 app names to ignore during checks.                          | `['pm2-monitor', 'pm2-logrotate']` |
-| `THRESHOLDS`         | An object defining the CPU (%) and Memory (MB) limits.                      | `{ CPU: 80, MEMORY: 450 }`    |
-| `THROTTLE_DURATION_MS` | How long (in ms) to suppress identical alerts (e.g., repeated CPU warnings).| `30000` (30 seconds)          |
-| `RECHECK_TIMEOUT_SEC`| Total time (in seconds) to wait for a restarting app to stabilize.          | `60` (1 minute)               |
-| `WEB_SERVER.ENABLED` | Set to `true` to enable the status history web server.                      | `true`                        |
-| `WEB_SERVER.PORT`    | The port for the status web server.                                         | `3031`                        |
+## Configuration Reference
 
----
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SLACK_WEBHOOK_URL` | required | Slack Incoming Webhook URL. |
+| `PM2_BIN` | `pm2` or `pm2.cmd` on Windows | PM2 executable name or path. |
+| `CRON_SCHEDULE` | `*/1 8-19 * * 1-5` | Monitor schedule in node-cron syntax. |
+| `CRON_TIMEZONE` | `America/New_York` | Time zone used for scheduling and timestamps. |
+| `EXCLUDED_APPS` | `pm2-monitor,pm2-logrotate` | Comma-separated PM2 app names to ignore. |
+| `CPU_THRESHOLD` | `80` | CPU percentage alert threshold. |
+| `MEMORY_THRESHOLD_MB` | `450` | Memory alert threshold in MB. |
+| `THROTTLE_DURATION_MS` | `30000` | Minimum interval for identical Slack alerts. |
+| `RECHECK_INTERVAL_MS` | `5000` | Restart polling interval. |
+| `RECHECK_MAX_ATTEMPTS` | `12` | Restart polling attempt limit. |
+| `SLACK_TIMEOUT_MS` | `10000` | Slack request timeout. |
+| `RUN_ONCE` | `false` | Run one monitoring cycle and exit. Useful for smoke tests. |
+| `WEB_ENABLED` | `true` | Enable the status HTTP endpoint. |
+| `HOST` | `127.0.0.1` | Bind address for the status endpoint. |
+| `PORT` | `3031` | Port for the status endpoint. |
+| `STATUS_LOG_FILE` | `./status-history.json` | Runtime status history file. |
+| `MAX_HISTORY` | `1440` | Number of status snapshots to retain. |
+| `STATUS_TOKEN` | empty | Optional bearer/query token for `/status`. |
 
-## 🚀 Usage
+## Status Endpoint
 
-The recommended way to run the monitor is with PM2, using the provided configuration file.
+When enabled, the monitor exposes:
 
-1.  **Start the monitor with PM2:**
-    This command will register the script as a PM2 process named `pm2-monitor`.
-    ```bash
-    npm start
-    ```
+```text
+GET /healthz
+GET /status
+```
 
-2.  **Check the logs:**
-    To see the monitor's activity and check for errors, run:
-    ```bash
-    npm run logs
-    ```
-    or
-    ```bash
-    pm2 logs pm2-monitor
-    ```
+By default it binds to `127.0.0.1` to avoid exposing process details publicly.
+If you set `HOST=0.0.0.0`, also set `STATUS_TOKEN`.
 
-3.  **Save the process list:**
-    To ensure the monitor restarts automatically after a server reboot, run:
-    ```bash
-    pm2 save
-    ```
+With a token:
 
-### Optional: Viewing Status History
+```bash
+curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status
+```
 
-If `WEB_SERVER.ENABLED` is `true`, you can view a JSON history of process statuses by navigating to:
-`http://<your-server-ip>:3031/status`
+## Security Notes
 
----
+- Do not commit real Slack webhook URLs.
+- Keep `.env` private. `.env.example` is safe to commit.
+- `status-history.json` is runtime data and is ignored by Git.
+- Keep dependencies patched with Dependabot and `npm audit`.
 
-## ⚠️ Security Notice
+## License
 
-Your `SLACK_WEBHOOK_URL` is a secret. **Do not hardcode it** in `ecosystem.config.cjs` or any other file that will be committed to version control. Use an environment variable or a `.env` file (which should be added to `.gitignore`) to keep it secure.
-
----
-
-## 📄 License
-
-This project is licensed under the ISC License.
+Unlicense

@@ -82,7 +82,7 @@ npm run audit
 | `PORT` | `3031` | Port for the status endpoint. |
 | `STATUS_LOG_FILE` | `./status-history.json` | Runtime status history file. |
 | `MAX_HISTORY` | `1440` | Number of status snapshots to retain. |
-| `STATUS_TOKEN` | empty | Optional bearer/query token for `/status`. |
+| `STATUS_TOKEN` | empty | Bearer token for `/status`. Required when `HOST` is not a loopback address. |
 
 ## Status Endpoint
 
@@ -94,7 +94,7 @@ GET /status
 ```
 
 By default it binds to `127.0.0.1` to avoid exposing process details publicly.
-If you set `HOST=0.0.0.0`, also set `STATUS_TOKEN`.
+If you set `HOST=0.0.0.0`, also set `STATUS_TOKEN`; otherwise `/status` answers 401.
 
 With a token:
 

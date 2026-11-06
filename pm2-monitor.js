@@ -8,6 +8,7 @@
 
 import 'dotenv/config';
 import { execFile as callbackExecFile } from 'child_process';
+import { createHash, timingSafeEqual } from 'crypto';
 import { promisify } from 'util';
 import cron from 'node-cron';
 import axios from 'axios';
@@ -320,7 +321,7 @@ function startWebServer() {
       return;
     }
 
-    if (!isAuthorizedStatusRequest(req, url)) {
+    if (!isAuthorizedStatusRequest(req)) {
       sendJson(res, 401, { error: 'Unauthorized' });
       return;
     }
@@ -341,6 +342,9 @@ function startWebServer() {
   server.listen(PORT, HOST, () => {
     const tokenNote = CONFIG.WEB_SERVER.STATUS_TOKEN ? ' token-protected' : '';
     console.log(`[Info] Status server is running at http://${HOST}:${PORT}/status${tokenNote}`);
+    if (!CONFIG.WEB_SERVER.STATUS_TOKEN && !isLoopbackHost(HOST)) {
+      console.warn(`[Warn] HOST=${HOST} is not a loopback address. /status stays closed until STATUS_TOKEN is set.`);
+    }
   });
 
   server.on('error', (error) => {
@@ -373,12 +377,17 @@ async function logStatusToFile(processes) {
   await fs.rename(tmpFile, STATUS_LOG_FILE);
 }
 
-function isAuthorizedStatusRequest(req, url) {
-  const { STATUS_TOKEN } = CONFIG.WEB_SERVER;
-  if (!STATUS_TOKEN) return true;
+function isAuthorizedStatusRequest(req) {
+  const { HOST, STATUS_TOKEN } = CONFIG.WEB_SERVER;
+  if (!STATUS_TOKEN) return isLoopbackHost(HOST);
 
-  const authHeader = req.headers.authorization || '';
-  return authHeader === `Bearer ${STATUS_TOKEN}` || url.searchParams.get('token') === STATUS_TOKEN;
+  // Hashing gives both sides the same length, which timingSafeEqual requires.
+  const sha256 = (value) => createHash('sha256').update(value).digest();
+  return timingSafeEqual(sha256(req.headers.authorization || ''), sha256(`Bearer ${STATUS_TOKEN}`));
+}
+
+function isLoopbackHost(host) {
+  return ['127.0.0.1', '::1', 'localhost'].includes(host);
 }
 
 function sendJson(res, statusCode, body) {

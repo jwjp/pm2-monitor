@@ -64,7 +64,7 @@ The script also accepts `--once` and `--dry-run` directly:
 | --- | --- |
 | Process Restart Detected | An instance's restart count went up since the last check. |
 | Restart Successful / Restart Failed | Result of the follow-up checks after a restart. |
-| App Recovered | An app whose restart check failed is healthy again. |
+| App Recovered | An app whose restart check failed is healthy again, or an app that relapsed has stayed up for `INCIDENT_STABLE_MS`. |
 | Process Status Alert → Process Back Online | An instance is not `online` (a change such as `stopping` → `errored` is a new alert). |
 | High CPU / Memory Usage → Back to Normal | Above the threshold for `RESOURCE_ALERT_SAMPLES` checks in a row. |
 | Monitoring Failed → Monitoring Recovered | `pm2 jlist` could not be run or parsed. |
@@ -89,6 +89,7 @@ is reported at the first check of the next morning (the alert says since when).
 | `MEMORY_THRESHOLD_MB` | `450` | Memory alert threshold in MB. |
 | `RESOURCE_ALERT_SAMPLES` | `2` | Consecutive checks above a threshold before alerting. |
 | `ALERT_REPEAT_MS` | `1800000` (30 min) | Reminder interval while a problem lasts; `0` turns reminders off. `THROTTLE_DURATION_MS` is accepted as the old name (values under 5 min are ignored with a warning). |
+| `INCIDENT_STABLE_MS` | `600000` (10 min) | How long an app must stay up after a restart before the incident closes. A restart within this time is reported once as a relapse, and later ones are logged until the app stays up this long. `0` closes the incident at the first success. |
 | `RECHECK_INTERVAL_MS` | `5000` | Interval between follow-up checks after a restart (min 1000). |
 | `RECHECK_MAX_ATTEMPTS` | `12` | Number of follow-up checks after a restart. |
 | `SLACK_TIMEOUT_MS` | `10000` | Slack request timeout. |
@@ -96,7 +97,7 @@ is reported at the first check of the next morning (the alert says since when).
 | `WEB_ENABLED` | `true` | Enable the status endpoint and history file. |
 | `HOST` | `127.0.0.1` | Bind address for the status endpoint. |
 | `PORT` | `3031` | Port for the status endpoint. |
-| `STATUS_LOG_FILE` | `./status-history.json` | File the status history is saved to. |
+| `STATUS_LOG_FILE` | `./status-history.json` | File the status history is saved to. A relative path is relative to the project directory, like `.env`. |
 | `MAX_HISTORY` | `1440` | Number of snapshots to keep. |
 | `STATUS_SAVE_INTERVAL_MS` | `300000` (5 min) | How often the history file is rewritten; `0` saves after every check. Unsaved snapshots are written on shutdown. |
 | `STATUS_TOKEN` | empty | Bearer token for `/status`. Required when `HOST` is not a loopback address. |
@@ -166,9 +167,12 @@ curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit
 - **A crash loop may never become `errored`.** PM2 only counts a restart against
   `max_restarts` when the process lived shorter than `min_uptime` (1s by
   default). An app that crashes after a few seconds keeps restarting while
-  showing `online`. The monitor reports this as one incident ("Restart
-  Detected" followed by "Restart Failed") and logs later restarts quietly
-  until the app is stable or the reminder interval passes.
+  showing `online`. The monitor reports this as one incident and logs later
+  restarts quietly until the app is stable or the reminder interval passes.
+  If the app crashes during the follow-up checks, that is "Restart Detected"
+  followed by "Restart Failed". If it crashes later, after "Restart
+  Successful", one more "Restart Detected" says that it restarted again. In
+  both cases "App Recovered" follows once it stays up for `INCIDENT_STABLE_MS`.
 - **Checks only run on the schedule.** Restarts between checks are counted and
   reported at the next check; the exact time of each restart is not known.
 

@@ -41,7 +41,19 @@ export function createMonitor({
     else alerts.markSent(key, now());
   }
 
-  async function runCycle() {
+  // Cycles in progress, so stop() can let a check finish its sends and history.
+  const cycles = new Set();
+  let stopped = false;
+
+  function runCycle() {
+    if (stopped) return Promise.resolve({ ok: false, skipped: true });
+    const cycle = runOneCycle();
+    cycles.add(cycle);
+    cycle.finally(() => cycles.delete(cycle)).catch(() => {});
+    return cycle;
+  }
+
+  async function runOneCycle() {
     if (running) {
       logger.warn('[Monitor] The previous check is still running. Skipping this run.');
       return { ok: false, skipped: true };
@@ -118,26 +130,40 @@ export function createMonitor({
   }
 
   async function handleRestart(app, count, ids, reference, detectedAt) {
-    const incident = incidents.get(app) ?? { notifiedAt: null, restarts: 0 };
+    const incident = incidents.get(app) ?? newIncident();
     incidents.set(app, incident);
     incident.restarts += count;
 
+    // A restart after the app was reported stable means it is crash-looping
+    // slower than the watch can see. Say so once, then treat it as one incident.
+    if (incident.stableSince !== null) {
+      if (incident.recoveryAnnounced) {
+        incident.relapseAfter = detectedAt - incident.stableSince;
+        incident.recoveryAnnounced = false;
+        incident.flapping = true;
+      }
+      incident.stableSince = null;
+    }
+    const relapse = incident.relapseAfter !== null;
+
     // While an incident is open, repeat the alert only after the reminder interval.
     const reminderDue = config.alertRepeatMs > 0 && detectedAt - incident.notifiedAt >= config.alertRepeatMs;
-    const quiet = incident.notifiedAt !== null && !reminderDue;
+    const quiet = incident.notifiedAt !== null && !reminderDue && !relapse;
 
     if (quiet) {
       logger.log(`[Restart] '${app}' restarted ${count} more time(s). An alert for this incident was already sent.`);
     } else {
       const since = lastCycleAt ? ` since the last check at ${formatTime(new Date(lastCycleAt), config.timezone)}` : '';
       const total = incident.restarts > count ? `\n${incident.restarts} restart(s) since this incident started.` : '';
-      const sent = await notify({
-        app,
-        title: 'Process Restart Detected',
-        message: `Detected ${count} restart(s) of '${app}' (instance ${ids.join(', ')})${since}.${total}\nWatching for up to ${watchSeconds()} seconds.`,
-        level: 'warning',
-      });
-      if (sent) incident.notifiedAt = detectedAt;
+      const reminder = config.alertRepeatMs > 0 ? `, with a reminder every ${formatDuration(config.alertRepeatMs)}` : '';
+      const message = relapse
+        ? `'${app}' restarted again ${formatDuration(incident.relapseAfter)} after it was reported stable: ${count} restart(s) (instance ${ids.join(', ')})${since}.${total}\nFurther restarts are only logged${reminder}, until it stays up for ${formatDuration(config.incidentStableMs)}.`
+        : `Detected ${count} restart(s) of '${app}' (instance ${ids.join(', ')})${since}.${total}\nWatching for up to ${watchSeconds()} seconds.`;
+      const sent = await notify({ app, title: 'Process Restart Detected', message, level: 'warning' });
+      if (sent) {
+        incident.notifiedAt = detectedAt;
+        incident.relapseAfter = null;
+      }
     }
 
     if (watches.has(app)) {
@@ -218,26 +244,63 @@ export function createMonitor({
     }
   }
 
+  /**
+   * Called when an app with an open incident looks healthy: by its watch, or by
+   * a later check. The first time, the recovery is reported. The incident stays
+   * open until the app has stayed up for `incidentStableMs`, so a restart soon
+   * after is reported as a relapse instead of a new incident. An app that
+   * relapsed is reported as recovered only once that period has passed.
+   */
   async function handleRecovered(app, instances, title = 'Restart Successful') {
     const incident = incidents.get(app);
-    logger.log(`[Restart] '${app}' is stable again.`);
+    if (!incident) return;
+    if (incident.stableSince === null) {
+      incident.stableSince = now();
+      logger.log(`[Restart] '${app}' is stable again.`);
+    }
     // Follow up whenever the channel heard about this incident, even if only the failure got through.
-    if (!incident || (incident.notifiedAt === null && !incident.failureSent)) {
+    if (incident.notifiedAt === null && !incident.failureSent) {
       incidents.delete(app);
       return;
     }
 
-    const sent = await notify({
-      app,
-      title,
-      message: `'${app}' is stable: all ${instances.length} instance(s) are online.\n(${usageSummary(instances)})`,
-      level: 'good',
-    });
-    // An undelivered recovery keeps the incident open; closeRecoveredIncidents retries it.
-    if (!sent) return;
+    const stableFor = now() - incident.stableSince;
+    const settled = stableFor >= config.incidentStableMs;
+    if (incident.flapping) {
+      if (!settled) return;
+      const sent = await notify({
+        app,
+        title: 'App Recovered',
+        message: `'${app}' has stayed up for ${formatDuration(stableFor)} after ${incident.restarts} restart(s): all ${instances.length} instance(s) are online.\n(${usageSummary(instances)})`,
+        level: 'good',
+      });
+      if (sent) closeIncident(app, instances);
+      return;
+    }
+
+    if (!incident.recoveryAnnounced) {
+      const sent = await notify({
+        app,
+        title,
+        message: `'${app}' is stable: all ${instances.length} instance(s) are online.\n(${usageSummary(instances)})`,
+        level: 'good',
+      });
+      // An undelivered recovery keeps the incident open; closeRecoveredIncidents retries it.
+      if (!sent) return;
+      incident.recoveryAnnounced = true;
+      resolveStatusAlerts(instances);
+    }
+    if (settled) closeIncident(app, instances);
+  }
+
+  function closeIncident(app, instances) {
     incidents.delete(app);
-    // This message already says every instance is online, so a separate
-    // "Process Back Online" for the same instances would only repeat it.
+    resolveStatusAlerts(instances);
+  }
+
+  // A recovery message already says every instance is online, so a separate
+  // "Process Back Online" for the same instances would only repeat it.
+  function resolveStatusAlerts(instances) {
     for (const p of instances) alerts.markResolved(`${instanceKey(p)}::status`);
   }
 
@@ -329,10 +392,26 @@ export function createMonitor({
     }),
     /** Waits for running restart watches to settle; used by tests. */
     idle: () => Promise.allSettled([...watches.values()]),
+    /** Lets a running check finish, then ends restart watches. Later checks are skipped. */
     async stop() {
+      stopped = true;
       controller.abort();
+      await Promise.allSettled([...cycles]);
       await Promise.allSettled([...watches.values()]);
     },
+  };
+}
+
+function newIncident() {
+  return {
+    notifiedAt: null, // when the last "Process Restart Detected" was delivered
+    restarts: 0,
+    failureNotifiedAt: null, // notifiedAt of the incident when "Restart Failed" was delivered
+    failureSent: false,
+    stableSince: null, // when the app was first seen healthy since its last restart
+    recoveryAnnounced: false,
+    flapping: false, // restarted again after it had been reported stable
+    relapseAfter: null, // set while that relapse has not been delivered
   };
 }
 

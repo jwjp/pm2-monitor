@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.js';
 import { decodeConsoleOutput, parseJlist } from '../src/pm2.js';
 import { AlertTracker } from '../src/alerts.js';
-import { buildSlackPayload, createNotifier } from '../src/notifier.js';
+import { buildSlackPayload, buildDiscordPayload, createNotifier } from '../src/notifier.js';
 import { silentLogger } from './helpers.js';
 
 const WEBHOOK = 'https://hooks.slack.com/services/T000/B000/XXXX';
+const DISCORD_WEBHOOK = 'https://discord.com/api/webhooks/123456/abcdef';
 
 test('config: defaults load with a valid webhook', () => {
   const { config, errors } = loadConfig({ SLACK_WEBHOOK_URL: WEBHOOK });
@@ -176,4 +177,52 @@ test('notifier: delivery failures return false instead of throwing', async () =>
     post: async () => { throw new Error('boom'); },
   });
   assert.equal(await notifier.send({ app: 'a', title: 't', message: 'm' }), false);
+});
+
+test('config: Discord webhook is supported as an alternative or complement to Slack', () => {
+  const discordOnly = loadConfig({ DISCORD_WEBHOOK_URL: DISCORD_WEBHOOK });
+  assert.deepEqual(discordOnly.errors, []);
+  assert.equal(discordOnly.config.discord.webhookUrl, DISCORD_WEBHOOK);
+
+  const both = loadConfig({ SLACK_WEBHOOK_URL: WEBHOOK, DISCORD_WEBHOOK_URL: DISCORD_WEBHOOK });
+  assert.deepEqual(both.errors, []);
+  assert.equal(both.config.slack.webhookUrl, WEBHOOK);
+  assert.equal(both.config.discord.webhookUrl, DISCORD_WEBHOOK);
+
+  const invalid = loadConfig({ DISCORD_WEBHOOK_URL: 'https://example.com/not-discord' });
+  assert.match(invalid.errors.join('\n'), /DISCORD_WEBHOOK_URL must be a Discord Webhook URL/);
+});
+
+test('notifier: buildDiscordPayload format and color mapping', () => {
+  const payload = buildDiscordPayload({
+    app: 'my-app',
+    title: 'High CPU',
+    message: 'CPU is 95%',
+    level: 'danger',
+    now: new Date('2026-01-01T00:00:00Z'),
+    timezone: 'UTC',
+  });
+  assert.equal(payload.content, '[PM2] High CPU: my-app');
+  assert.equal(payload.embeds[0].color, 0xa30200);
+  assert.match(payload.embeds[0].title, /\[PM2\] High CPU/);
+  assert.equal(payload.embeds[0].description, 'CPU is 95%');
+  assert.equal(payload.embeds[0].fields[0].value, '`my-app`');
+});
+
+test('notifier: sends to both Slack and Discord when configured', async () => {
+  const sentUrls = [];
+  const notifier = createNotifier({
+    slack: { webhookUrl: WEBHOOK },
+    discord: { webhookUrl: DISCORD_WEBHOOK },
+    timezone: 'UTC',
+    logger: silentLogger,
+    post: async (url) => {
+      sentUrls.push(url);
+      return { status: 200 };
+    },
+  });
+
+  const ok = await notifier.send({ app: 'test-app', title: 'Test Alert', message: 'testing' });
+  assert.equal(ok, true);
+  assert.deepEqual(sentUrls, [WEBHOOK, DISCORD_WEBHOOK]);
 });

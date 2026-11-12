@@ -1,33 +1,71 @@
 import axios from 'axios';
 
 const LEVELS = {
-  good: { color: 'good', icon: ':white_check_mark:' },
-  warning: { color: 'warning', icon: ':warning:' },
-  danger: { color: 'danger', icon: ':rotating_light:' },
+  good: { color: 'good', discordColor: 0x2eb886, icon: ':white_check_mark:' },
+  warning: { color: 'warning', discordColor: 0xdaa038, icon: ':warning:' },
+  danger: { color: 'danger', discordColor: 0xa30200, icon: ':rotating_light:' },
 };
 
 /**
- * Sends alerts to Slack. In dry-run mode alerts are only logged, which makes it
- * easy to try the monitor without a webhook. `send` resolves to true when the
- * alert was delivered (or logged in dry-run mode) and never throws.
+ * Sends alerts to Slack and/or Discord. In dry-run mode alerts are only logged,
+ * which makes it easy to try the monitor without a webhook. `send` resolves to
+ * true when the alert was delivered (or logged in dry-run mode) and never throws.
  */
-export function createNotifier({ webhookUrl, timeoutMs, dryRun = false, timezone, logger = console, post = axios.post }) {
+export function createNotifier({
+  webhookUrl,
+  timeoutMs,
+  slack = null,
+  discord = null,
+  dryRun = false,
+  timezone,
+  logger = console,
+  post = axios.post,
+}) {
+  const slackUrl = slack?.webhookUrl || webhookUrl;
+  const slackTimeout = slack?.timeoutMs || timeoutMs || 10 * 1000;
+  const discordUrl = discord?.webhookUrl;
+  const discordTimeout = discord?.timeoutMs || 10 * 1000;
+
   return {
     async send({ app, title, message, level = 'danger', now = new Date() }) {
       const prefix = dryRun ? '[Notify:dry-run]' : '[Notify]';
       logger.log(`${prefix} ${level.toUpperCase()} [${app}] ${title}: ${message.replace(/\n/g, ' | ')}`);
       if (dryRun) return true;
 
-      try {
-        await post(webhookUrl, buildSlackPayload({ app, title, message, level, now, timezone }), {
-          timeout: timeoutMs,
-          validateStatus: (status) => status >= 200 && status < 300,
+      const targets = [];
+      if (slackUrl) {
+        targets.push({
+          name: 'Slack',
+          url: slackUrl,
+          timeout: slackTimeout,
+          payload: buildSlackPayload({ app, title, message, level, now, timezone }),
         });
-        return true;
-      } catch (error) {
-        logger.error(`[Error] Failed to send Slack notification "${title}" for ${app}: ${error.message}`);
-        return false;
       }
+      if (discordUrl) {
+        targets.push({
+          name: 'Discord',
+          url: discordUrl,
+          timeout: discordTimeout,
+          payload: buildDiscordPayload({ app, title, message, level, now, timezone }),
+        });
+      }
+
+      if (targets.length === 0) return true;
+
+      const results = await Promise.all(targets.map(async (target) => {
+        try {
+          await post(target.url, target.payload, {
+            timeout: target.timeout,
+            validateStatus: (status) => status >= 200 && status < 300,
+          });
+          return true;
+        } catch (error) {
+          logger.error(`[Error] Failed to send ${target.name} notification "${title}" for ${app}: ${error.message}`);
+          return false;
+        }
+      }));
+
+      return results.every(Boolean);
     },
   };
 }
@@ -53,6 +91,23 @@ export function buildSlackPayload({ app, title, message, level, now, timezone })
         { type: 'divider' },
         { type: 'section', text: { type: 'mrkdwn', text: truncate(escapeMrkdwn(message), 3000) } },
       ],
+    }],
+  };
+}
+
+export function buildDiscordPayload({ app, title, message, level, now, timezone }) {
+  const { discordColor, icon } = LEVELS[level] || LEVELS.danger;
+  return {
+    content: `[PM2] ${title}: ${app}`,
+    embeds: [{
+      title: truncate(`${icon} [PM2] ${title}`, 256),
+      description: truncate(message, 4000),
+      color: discordColor,
+      fields: [
+        { name: 'App', value: `\`${app}\``, inline: true },
+        { name: 'Time', value: formatTime(now, timezone), inline: true },
+      ],
+      timestamp: (now instanceof Date ? now : new Date(now)).toISOString(),
     }],
   };
 }

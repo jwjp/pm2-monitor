@@ -68,3 +68,45 @@ test('a configured token is checked from the Authorization header only', async (
   assert.equal((await fetch(`${base}/status`, { headers: { Authorization: 'Bearer wrong' } })).status, 401);
   assert.equal((await fetch(`${base}/status`, { headers: { Authorization: 'Bearer s3cret' } })).status, 200);
 });
+
+test('dashboard: GET / and GET /dashboard serve HTML page', async () => {
+  const base = await start({ host: '127.0.0.1' });
+  for (const path of ['/', '/dashboard']) {
+    const res = await fetch(`${base}${path}`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /text\/html/);
+    const body = await res.text();
+    assert.match(body, /PM2 Monitor Dashboard/);
+    assert.match(body, /stat-total/);
+  }
+});
+
+test('metrics: GET /metrics serves prometheus text format', async () => {
+  const customHistory = {
+    list: () => [{
+      timestamp: '3',
+      processes: [
+        { name: 'api', pm_id: 0, status: 'online', restarts: 2, cpu: 15.5, memory: 120, uptimeStartedAt: 1000 },
+        { name: 'worker', pm_id: 1, status: 'errored', restarts: 5, cpu: null, memory: null, uptimeStartedAt: null },
+      ],
+    }],
+  };
+  const base = await start({ host: '127.0.0.1', history: customHistory });
+  const res = await fetch(`${base}/metrics`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /text\/plain/);
+  const text = await res.text();
+  assert.match(text, /# TYPE pm2_monitor_up gauge/);
+  assert.match(text, /pm2_monitor_watching_restarts 1/);
+  assert.match(text, /pm2_process_status\{app="api",pm_id="0",status="online"\} 1/);
+  assert.match(text, /pm2_process_status\{app="worker",pm_id="1",status="errored"\} 0/);
+  assert.match(text, /pm2_process_cpu_percent\{app="api",pm_id="0"\} 15\.5/);
+  assert.match(text, /pm2_process_restarts_total\{app="api",pm_id="0"\} 2/);
+});
+
+test('metrics: requires token when configured on non-loopback', async () => {
+  const base = await start({ host: '0.0.0.0', token: 's3cret' });
+  assert.equal((await fetch(`${base}/metrics`)).status, 401);
+  const ok = await fetch(`${base}/metrics`, { headers: { Authorization: 'Bearer s3cret' } });
+  assert.equal(ok.status, 200);
+});

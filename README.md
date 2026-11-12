@@ -1,7 +1,7 @@
-# PM2 Slack Monitor
+# PM2 Monitor
 
 A small Node.js monitor for PM2-managed services. It checks process status,
-restart counts, CPU and memory, sends a Slack alert when something needs
+restart counts, CPU and memory, sends Slack/Discord alerts when something needs
 attention, and sends a follow-up when the problem clears.
 
 ## Features
@@ -12,6 +12,8 @@ attention, and sends a follow-up when the problem clears.
 - **One alert per problem.** Each problem is alerted once when it starts, then
   optionally as a reminder while it lasts (`ALERT_REPEAT_MS`), and once more
   when it is resolved. Crash loops do not flood the channel.
+- **Multi-channel alerts.** Supports both Slack and Discord webhooks, separately
+  or at the same time.
 - **Spike filtering.** CPU and memory alerts fire only after
   `RESOURCE_ALERT_SAMPLES` consecutive checks above the threshold. Individual
   apps can use a higher or lower limit (`APP_THRESHOLDS`).
@@ -21,13 +23,18 @@ attention, and sends a follow-up when the problem clears.
 - **Strict configuration.** Invalid settings stop the monitor at startup with a
   message that names the variable, instead of falling back to a default without
   telling you.
+- **Built-in Web Dashboard.** A clean, responsive, zero-dependency HTML dashboard
+  served at `/` and `/dashboard` showing real-time process statuses, resource
+  gauges, and historical snapshots.
+- **Prometheus Metrics.** Exports standard Prometheus / OpenMetrics at `/metrics`
+  for seamless integration with Grafana and Prometheus scrapers.
 - **Error log excerpts** (opt-in, `RESTART_LOG_LINES`): restart alerts show the
-  end of the app's PM2 error log, so the crash reason is visible in Slack.
+  end of the app's PM2 error log, so the crash reason is visible in Slack/Discord.
 - **Heartbeat** (`HEARTBEAT_URL`): an external service such as Healthchecks.io
   or an Uptime Kuma push monitor alerts you when the monitor itself stops.
 - **Removed apps are reported**, and statuses you do not care about (for
   example `stopped` for apps stopped on purpose) can be ignored.
-- **Dry-run mode** to try the monitor without Slack.
+- **Dry-run mode** to try the monitor without sending real webhooks.
 - Optional local JSON endpoint with status history (`/status`, `/status/latest`, `/healthz`).
 
 ## Requirements
@@ -102,7 +109,9 @@ morning (the alert says since when).
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SLACK_WEBHOOK_URL` | required | Slack Incoming Webhook URL. Not needed with `DRY_RUN`. |
+| `SLACK_WEBHOOK_URL` | required* | Slack Incoming Webhook URL. (*At least one of Slack or Discord is required unless `DRY_RUN`). |
+| `DISCORD_WEBHOOK_URL` | empty | Optional Discord Webhook URL. Can be used instead of or alongside Slack. |
+| `DISCORD_TIMEOUT_MS` | `10000` | Discord webhook request timeout. |
 | `DRY_RUN` | `false` | Log alerts instead of sending them (same as `--dry-run`). |
 | `PM2_BIN` | `pm2` (`pm2.cmd` on Windows) | PM2 executable name or path. |
 | `CRON_SCHEDULE` | `*/1 8-19 * * 1-5` | Check schedule in node-cron syntax. |
@@ -151,13 +160,20 @@ a plain "every minute" check would alert every night. Healthchecks.io accepts
 the cron expression and time zone directly. The URL is treated as a secret:
 logs show only its origin.
 
-## Status endpoint
+## Web Dashboard and Endpoints
 
 ```text
+GET /                     Built-in interactive HTML web dashboard
+GET /dashboard            Same as GET /
 GET /healthz              {"ok":true,"lastCycleAt":"…","running":false}  (+ "watchingRestarts" when authorized)
-GET /status[?limit=N]     status snapshots, newest first
-GET /status/latest        the most recent snapshot, or null
+GET /metrics              Prometheus text metrics (OpenMetrics format)
+GET /status[?limit=N]     Status snapshots, newest first (JSON)
+GET /status/latest        The most recent snapshot, or null
 ```
+
+Open `http://localhost:3031` in your browser to view the **Web Dashboard** with real-time status badges, CPU/memory progress meters, and process details. If `STATUS_TOKEN` is set, the dashboard provides a token entry dialog stored in local storage.
+
+`/metrics` outputs standard Prometheus gauges and counters (`pm2_monitor_up`, `pm2_process_status`, `pm2_process_cpu_percent`, `pm2_process_memory_bytes`, `pm2_process_restarts_total`, `pm2_process_uptime_seconds`) for scraping with Prometheus or Grafana Agent.
 
 Each snapshot looks like
 `{"timestamp":"2026-11-12T02:31:00.017Z","processes":[{"pm_id":0,"name":"api","status":"online","restarts":3,"cpu":2,"memory":50,…}]}`.
@@ -167,14 +183,20 @@ Timestamps are ISO 8601 in UTC; `memory` is in MB. `cpu` and `memory` are
 that case.
 
 By default the endpoint binds to `127.0.0.1`. If you set `HOST=0.0.0.0`, also
-set `STATUS_TOKEN`; otherwise `/status` answers 401. `/healthz` needs no token,
+set `STATUS_TOKEN`; otherwise `/status` and `/metrics` answer 401. `/healthz` needs no token,
 but lists the apps under a restart watch (`watchingRestarts`) only to clients
 that may read `/status`. One-off runs (`--once`, `npm run dry-run`) neither
 start the endpoint nor write `status-history.json` or `monitor-state.json`.
 
 ```bash
 curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit=5
+curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/metrics
 ```
+
+## Upgrading from 3.1
+
+- **Web Dashboard and Prometheus Metrics are included.** Access `/` or `/dashboard` in your browser for a visual status view, or scrape `/metrics` with Prometheus.
+- **Discord Webhooks are supported.** Set `DISCORD_WEBHOOK_URL` to send alerts to Discord, or use both Slack and Discord simultaneously.
 
 ## Upgrading from 3.0
 
@@ -269,7 +291,8 @@ src/alerts.js      alert state (start, reminder, resolve)
 src/notifier.js    Slack payloads and delivery (or dry-run logging)
 src/history.js     in-memory status history persisted to a JSON file
 src/state.js       alert and incident state persisted across monitor restarts
-src/server.js      /healthz and /status endpoints
+src/dashboard.js   self-contained HTML dashboard
+src/server.js      /healthz, /status, /metrics and dashboard endpoints
 test/              tests (npm test)
 ```
 

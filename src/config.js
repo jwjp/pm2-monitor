@@ -153,6 +153,10 @@ export function loadConfig(env = process.env, argv = []) {
       webhookUrl: read('SLACK_WEBHOOK_URL'),
       timeoutMs: number('SLACK_TIMEOUT_MS', 10 * 1000, { min: 1000 }),
     },
+    discord: {
+      webhookUrl: read('DISCORD_WEBHOOK_URL'),
+      timeoutMs: number('DISCORD_TIMEOUT_MS', 10 * 1000, { min: 1000 }),
+    },
     thresholds: {
       cpu: number('CPU_THRESHOLD', 80, { min: 0 }),
       memoryMb: number('MEMORY_THRESHOLD_MB', 450, { min: 0 }),
@@ -192,8 +196,20 @@ export function loadConfig(env = process.env, argv = []) {
     },
   };
 
-  if (!dryRun && !isValidSlackWebhookUrl(config.slack.webhookUrl)) {
-    errors.push('SLACK_WEBHOOK_URL must be a Slack Incoming Webhook URL (https://hooks.slack.com/services/...). Use --dry-run to test without Slack.');
+  if (!dryRun) {
+    const hasSlack = Boolean(config.slack.webhookUrl);
+    const hasDiscord = Boolean(config.discord.webhookUrl);
+
+    if (!hasSlack && !hasDiscord) {
+      errors.push('SLACK_WEBHOOK_URL must be a Slack Incoming Webhook URL (https://hooks.slack.com/services/...). Use --dry-run to test without Slack.');
+    } else {
+      if (hasSlack && !isValidSlackWebhookUrl(config.slack.webhookUrl)) {
+        errors.push('SLACK_WEBHOOK_URL must be a Slack Incoming Webhook URL (https://hooks.slack.com/services/...). Use --dry-run to test without Slack.');
+      }
+      if (hasDiscord && !isValidDiscordWebhookUrl(config.discord.webhookUrl)) {
+        errors.push('DISCORD_WEBHOOK_URL must be a Discord Webhook URL (https://discord.com/api/webhooks/...).');
+      }
+    }
   }
   if (!cron.validate(config.schedule)) {
     errors.push(`CRON_SCHEDULE is not a valid cron expression: "${config.schedule}".`);
@@ -210,6 +226,18 @@ export function isValidSlackWebhookUrl(value) {
   try {
     const url = new URL(value);
     return url.protocol === 'https:' && url.hostname === 'hooks.slack.com' && url.pathname.startsWith('/services/');
+  } catch {
+    return false;
+  }
+}
+
+export function isValidDiscordWebhookUrl(value) {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' &&
+      (url.hostname === 'discord.com' || url.hostname === 'discordapp.com') &&
+      url.pathname.startsWith('/api/webhooks/');
   } catch {
     return false;
   }

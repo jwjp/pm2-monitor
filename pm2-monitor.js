@@ -58,8 +58,8 @@ async function main() {
     config,
     listProcesses: () => listPm2Processes(config, { usageReader }),
     notifier: createNotifier({
-      webhookUrl: config.slack.webhookUrl,
-      timeoutMs: config.slack.timeoutMs,
+      slack: config.slack,
+      discord: config.discord,
       dryRun: config.dryRun,
       timezone: config.timezone,
     }),
@@ -121,7 +121,7 @@ async function main() {
 
 function startServer(config, history, monitor) {
   const { host, port, token } = config.web;
-  const server = createStatusServer({ host, token, history, getState: monitor.getState });
+  const server = createStatusServer({ host, port, token, history, getState: monitor.getState });
 
   server.on('error', (error) => {
     console.error(`[Error] Status server failed: ${error.message}`);
@@ -129,7 +129,7 @@ function startServer(config, history, monitor) {
   server.listen(port, host, () => {
     const address = server.address();
     const shown = host.includes(':') ? `[${host}]` : host;
-    console.log(`[Info] Status server: http://${shown}:${address.port}/status${token ? ' (token required)' : ''}`);
+    console.log(`[Info] Status server: http://${shown}:${address.port}/ (dashboard, /status, /metrics)${token ? ' (token required)' : ''}`);
     if (!token && !isLoopbackHost(host)) {
       console.warn(`[Warn] HOST=${host} is not a loopback address, so /status answers 401 until STATUS_TOKEN is set.`);
     }
@@ -140,7 +140,10 @@ function startServer(config, history, monitor) {
 function printSummary(config) {
   console.log('Starting PM2 monitor.');
   console.log(`- Schedule: ${config.runOnce ? 'run once' : `${config.schedule} (${config.timezone})`}`);
-  console.log(`- Slack: ${config.dryRun ? 'dry run (alerts are only logged)' : 'enabled'}`);
+  console.log(`- Slack: ${config.slack.webhookUrl ? (config.dryRun ? 'dry run (alerts are only logged)' : 'enabled') : 'off'}`);
+  if (config.discord.webhookUrl) {
+    console.log(`- Discord: ${config.dryRun ? 'dry run (alerts are only logged)' : 'enabled'}`);
+  }
   const overrides = [...config.appThresholds.keys()];
   console.log(`- Thresholds: CPU > ${config.thresholds.cpu}%, Memory > ${config.thresholds.memoryMb}MB for ${config.resourceAlertSamples} check(s)${overrides.length > 0 ? `; per app: ${overrides.join(', ')}` : ''}`);
   console.log(`- Monitor state: ${config.runOnce ? 'not saved (one-off run)' : config.state.file}`);

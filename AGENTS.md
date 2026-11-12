@@ -45,12 +45,13 @@ src/heartbeat.js   createHeartbeat({ url, timeoutMs }).ping() -> Promise<boolean
 src/monitor.js     createMonitor({...}): restart detection, restart watches,
                    status/resource conditions, incidents; the core logic
 src/alerts.js      AlertTracker: per-condition state (fire / repeat / resolve)
-src/notifier.js    createNotifier({...}).send(alert) -> Promise<boolean>; Slack payloads
+src/notifier.js    createNotifier({...}).send(alert) -> Promise<boolean>; Slack and Discord payloads
 src/history.js     in-memory history (newest first), atomic JSON file persistence,
                    saved at most every saveIntervalMs (flush({ force }) on shutdown)
 src/state.js       createMonitorState({ file, saveIntervalMs, now }): alert and
                    incident state, same atomic write and retry rules as history
-src/server.js      createStatusServer({...}): /healthz, /status, /status/latest
+src/dashboard.js   renderDashboardHtml({ host, port }): self-contained HTML dashboard
+src/server.js      createStatusServer({...}): /healthz, /status, /metrics, / and /dashboard
 test/helpers.js    setup(): monitor with fake PM2 state, clock, sleep and notifier.
                    memoryState() stands in for the state file
 test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
@@ -128,8 +129,9 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
     heartbeat, so a manual check cannot mask a dead scheduled monitor.
 11. **HTTP server**: parse URLs against a fixed base (`http://localhost`), never
     the `Host` header (a malformed Host used to crash the process). `/status`
-    needs a Bearer token compared with `timingSafeEqual`, or a loopback bind
-    address when no token is set. Do not accept tokens in query strings.
+    and `/metrics` need a Bearer token compared with `timingSafeEqual`, or a loopback bind
+    address when no token is set. Do not accept tokens in query strings. `/` and
+    `/dashboard` serve a self-contained web dashboard.
 12. **Monitor state** (`src/state.js`) is the alert machine, separate from the
     status history. It stores restart baselines, `AlertTracker` entries
     (including a resolve that has not been delivered), breach streaks,
@@ -145,6 +147,9 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
 13. **Per-app thresholds** (`config.appThresholds`, from `APP_THRESHOLDS`)
     override cpu, memoryMb, or both for one app name. An omitted field keeps
     the global threshold. The alert text shows the threshold that was used.
+14. **Multi-channel alerts**: `SLACK_WEBHOOK_URL` and `DISCORD_WEBHOOK_URL` can
+    be used individually or together. Delivery succeeds when all configured
+    channels deliver successfully.
 
 ## Platform gotchas
 

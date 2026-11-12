@@ -37,7 +37,8 @@ export function buildSlackPayload({ app, title, message, level, now, timezone })
   const header = truncate(`${icon} [PM2] ${title}`, 150);
 
   return {
-    text: `[PM2] ${title}: ${app}`,
+    // The fallback text is parsed as mrkdwn too, so an app name like <!channel> must not ping anyone.
+    text: escapeMrkdwn(`[PM2] ${title}: ${app}`),
     attachments: [{
       color,
       blocks: [

@@ -87,7 +87,7 @@ is reported at the first check of the next morning (the alert says since when).
 | `CPU_THRESHOLD` | `80` | CPU percentage alert threshold. |
 | `MEMORY_THRESHOLD_MB` | `450` | Memory alert threshold in MB. |
 | `RESOURCE_ALERT_SAMPLES` | `2` | Consecutive checks above a threshold before alerting. |
-| `ALERT_REPEAT_MS` | `1800000` (30 min) | Reminder interval while a problem lasts; `0` turns reminders off. `THROTTLE_DURATION_MS` is accepted as the old name. |
+| `ALERT_REPEAT_MS` | `1800000` (30 min) | Reminder interval while a problem lasts; `0` turns reminders off. `THROTTLE_DURATION_MS` is accepted as the old name (values under 5 min are ignored with a warning). |
 | `RECHECK_INTERVAL_MS` | `5000` | Interval between follow-up checks after a restart (min 1000). |
 | `RECHECK_MAX_ATTEMPTS` | `12` | Number of follow-up checks after a restart. |
 | `SLACK_TIMEOUT_MS` | `10000` | Slack request timeout. |
@@ -102,7 +102,7 @@ is reported at the first check of the next morning (the alert says since when).
 ## Status endpoint
 
 ```text
-GET /healthz              {"ok":true,"lastCycleAt":"…","running":false,"watchingRestarts":[]}
+GET /healthz              {"ok":true,"lastCycleAt":"…","running":false}  (+ "watchingRestarts" when authorized)
 GET /status[?limit=N]     status snapshots, newest first
 GET /status/latest        the most recent snapshot, or null
 ```
@@ -112,7 +112,10 @@ Each snapshot looks like
 Timestamps are ISO 8601 in UTC; `memory` is in MB.
 
 By default the endpoint binds to `127.0.0.1`. If you set `HOST=0.0.0.0`, also
-set `STATUS_TOKEN`; otherwise `/status` answers 401.
+set `STATUS_TOKEN`; otherwise `/status` answers 401. `/healthz` needs no token,
+but lists the apps under a restart watch (`watchingRestarts`) only to clients
+that may read `/status`. One-off runs (`--once`, `npm run dry-run`) neither
+start the endpoint nor write `status-history.json`.
 
 ```bash
 curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit=5
@@ -125,15 +128,18 @@ curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit
   Update dashboards that parse the old format.
 - **`THROTTLE_DURATION_MS` now means the reminder interval** (it is read as
   `ALERT_REPEAT_MS`). Problems are alerted once when they start and once when
-  they clear, so an old value such as `30000` would send a reminder every 30
-  seconds. Remove it or set `ALERT_REPEAT_MS` instead.
+  they clear. A value under 5 minutes, such as the old default `30000`, would
+  send a reminder at every check, so it is ignored with a startup warning and
+  the 30-minute default is used. Remove it or set `ALERT_REPEAT_MS` instead;
+  `ALERT_REPEAT_MS` is always taken as given.
 - **CPU and memory alerts wait for 2 consecutive checks** by default. Set
   `RESOURCE_ALERT_SAMPLES=1` for the old behavior.
 - **`.env` is read from the project directory**, not the working directory, and
   `ecosystem.config.cjs` no longer sets `PORT`, `HOST` or `WEB_ENABLED`.
 - **Invalid settings stop startup** instead of silently falling back to defaults.
   Run `npm run dry-run` after upgrading to see any configuration errors.
-- `/healthz` now also returns `lastCycleAt`, `running` and `watchingRestarts`.
+- `/healthz` now also returns `lastCycleAt` and `running`, plus
+  `watchingRestarts` for authorized clients.
 
 ## Known limitations
 

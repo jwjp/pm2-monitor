@@ -14,7 +14,8 @@ export class AlertTracker {
    * Returns what to notify for `key` at `now`:
    * - 'fire'    the condition is new (or its signature changed), or a previous send failed
    * - 'repeat'  the condition is still active and the reminder interval has passed
-   * - 'resolve' the condition cleared after it had been notified
+   * - 'resolve' the condition cleared after it had been notified; it is
+   *             returned again on later checks until `markResolved` is called
    * - null      nothing to send
    */
   evaluate(key, isActive, now, signature = '') {
@@ -22,8 +23,22 @@ export class AlertTracker {
 
     if (!isActive) {
       if (!entry) return null;
-      this.active.delete(key);
-      return entry.lastSentAt === null ? null : 'resolve';
+      if (entry.lastSentAt === null) {
+        this.active.delete(key);
+        return null;
+      }
+      // Kept until the resolve is delivered, so a failed send is retried.
+      entry.resolving = true;
+      return 'resolve';
+    }
+
+    if (entry?.resolving) {
+      // The problem came back before its resolve was delivered. For the
+      // recipient it never ended, so it continues as the same alert.
+      entry.resolving = false;
+      if (entry.signature === signature) {
+        return this.repeatMs > 0 && now - entry.lastSentAt >= this.repeatMs ? 'repeat' : null;
+      }
     }
 
     if (!entry || entry.signature !== signature) {
@@ -39,6 +54,11 @@ export class AlertTracker {
   markSent(key, now) {
     const entry = this.active.get(key);
     if (entry) entry.lastSentAt = now;
+  }
+
+  /** Forgets a condition once its resolve has been delivered. */
+  markResolved(key) {
+    this.active.delete(key);
   }
 
   since(key) {

@@ -25,16 +25,19 @@ import { createStatusServer } from './src/server.js';
 dotenv.config({ path: fileURLToPath(new URL('./.env', import.meta.url)), quiet: true });
 
 async function main() {
-  const { config, errors } = loadConfig(process.env, process.argv.slice(2));
+  const { config, errors, warnings } = loadConfig(process.env, process.argv.slice(2));
   if (errors.length > 0) {
     console.error('Invalid configuration:');
     for (const error of errors) console.error(`  - ${error}`);
     process.exit(1);
   }
 
+  for (const warning of warnings) console.warn(`[Warn] ${warning}`);
   printSummary(config);
 
-  const history = config.web.enabled
+  // A one-off run serves no status endpoint, and writing the shared history
+  // file would race with a monitor already running under PM2.
+  const history = config.web.enabled && !config.runOnce
     ? createHistory({ file: config.web.historyFile, maxEntries: config.web.maxHistory })
     : null;
   await history?.load();
@@ -74,7 +77,12 @@ async function main() {
     console.log(`[Info] Received ${signal}. Shutting down.`);
     await task.stop();
     await monitor.stop();
-    await new Promise((resolve) => (server ? server.close(resolve) : resolve()));
+    // Idle keep-alive connections would otherwise hold close() open until PM2 kills the process.
+    await new Promise((resolve) => {
+      if (!server) return resolve();
+      server.close(resolve);
+      server.closeAllConnections?.();
+    });
     process.exit(0);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));

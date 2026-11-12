@@ -34,7 +34,9 @@ export function createStatusServer({ host, token, history, getState, logger = co
       return;
     }
     if (path === '/healthz') {
-      sendJson(res, 200, { ok: true, ...getState() });
+      // App names are only shown to clients that may also read /status.
+      const { watchingRestarts, ...state } = getState();
+      sendJson(res, 200, { ok: true, ...state, ...(isAuthorized(req) ? { watchingRestarts } : {}) });
       return;
     }
     if (!isAuthorized(req)) {

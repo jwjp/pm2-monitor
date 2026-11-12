@@ -38,10 +38,23 @@ test('config: dry run does not need a webhook, and flags override env', () => {
 });
 
 test('config: legacy THROTTLE_DURATION_MS still works and values are trimmed', () => {
-  const { config } = loadConfig({ DRY_RUN: ' TRUE ', THROTTLE_DURATION_MS: '60000', EXCLUDED_APPS: ' a, ,b ' });
+  const { config, warnings } = loadConfig({ DRY_RUN: ' TRUE ', THROTTLE_DURATION_MS: '600000', EXCLUDED_APPS: ' a, ,b ' });
   assert.equal(config.dryRun, true);
-  assert.equal(config.alertRepeatMs, 60000);
+  assert.equal(config.alertRepeatMs, 600000);
   assert.deepEqual(config.excludedApps, ['a', 'b']);
+  assert.match(warnings.join(' '), /Rename it to ALERT_REPEAT_MS/);
+});
+
+test('config: a short 1.x THROTTLE_DURATION_MS is not used as the reminder interval', () => {
+  const { config, errors, warnings } = loadConfig({ DRY_RUN: 'true', THROTTLE_DURATION_MS: '30000' });
+  assert.deepEqual(errors, []);
+  assert.equal(config.alertRepeatMs, 30 * 60 * 1000);
+  assert.match(warnings.join(' '), /THROTTLE_DURATION_MS=30000 is ignored/);
+
+  // ALERT_REPEAT_MS wins and is taken as given.
+  const explicit = loadConfig({ DRY_RUN: 'true', THROTTLE_DURATION_MS: '30000', ALERT_REPEAT_MS: '60000' });
+  assert.equal(explicit.config.alertRepeatMs, 60000);
+  assert.deepEqual(explicit.warnings, []);
 });
 
 test('pm2: parses jlist output and skips excluded apps', () => {
@@ -75,7 +88,19 @@ test('alerts: fire, suppress, repeat, resolve', () => {
   assert.equal(tracker.evaluate('k', true, 1000), 'repeat');
   tracker.markSent('k', 1000);
   assert.equal(tracker.evaluate('k', false, 1200), 'resolve');
+  tracker.markResolved('k');
   assert.equal(tracker.evaluate('k', false, 1300), null);
+});
+
+test('alerts: an undelivered resolve is returned again, and a relapse continues the alert', () => {
+  const tracker = new AlertTracker({ repeatMs: 1000 });
+  tracker.evaluate('k', true, 0);
+  tracker.markSent('k', 0);
+  assert.equal(tracker.evaluate('k', false, 100), 'resolve');
+  assert.equal(tracker.evaluate('k', false, 200), 'resolve');
+  // Back before the resolve got through: still the same problem for the recipient.
+  assert.equal(tracker.evaluate('k', true, 300), null);
+  assert.equal(tracker.evaluate('k', true, 1000), 'repeat');
 });
 
 test('alerts: an unsent alert is not resolved', () => {
@@ -86,7 +111,8 @@ test('alerts: an unsent alert is not resolved', () => {
 
 test('notifier: payload has fallback text and escapes Slack control characters', () => {
   const payload = buildSlackPayload({ app: 'a<b>', title: 'T', message: 'x & <y>', level: 'warning', now: new Date(0), timezone: 'UTC' });
-  assert.equal(payload.text, '[PM2] T: a<b>');
+  assert.equal(payload.text, '[PM2] T: a&lt;b&gt;');
+  assert.doesNotMatch(JSON.stringify(buildSlackPayload({ app: '<!channel>', title: 'T', message: 'm', level: 'good', now: new Date(0), timezone: 'UTC' })), /<!channel>/);
   assert.equal(payload.attachments[0].color, 'warning');
   assert.match(JSON.stringify(payload), /x &amp; &lt;y&gt;/);
 });

@@ -36,7 +36,9 @@ export function createMonitor({
     if (!action) return;
 
     const sent = await notify(render(action, alerts.since(key) ?? since));
-    if (sent && action !== 'resolve') alerts.markSent(key, now());
+    if (!sent) return;
+    if (action === 'resolve') alerts.markResolved(key);
+    else alerts.markSent(key, now());
   }
 
   async function runCycle() {
@@ -203,27 +205,40 @@ export function createMonitor({
     const incident = incidents.get(app);
     if (incident && incident.notifiedAt !== null && incident.failureNotifiedAt === incident.notifiedAt) return;
 
-    await notify({
+    const sent = await notify({
       app,
       title: 'Restart Failed',
       message: `'${app}' did not become stable after the restart.\n${details.join('\n')}`,
       level: 'danger',
     });
-    if (incident) incident.failureNotifiedAt = incident.notifiedAt;
+    // Only a delivered failure suppresses later ones, so a failed send is retried.
+    if (sent && incident) {
+      incident.failureNotifiedAt = incident.notifiedAt;
+      incident.failureSent = true;
+    }
   }
 
   async function handleRecovered(app, instances, title = 'Restart Successful') {
     const incident = incidents.get(app);
-    incidents.delete(app);
     logger.log(`[Restart] '${app}' is stable again.`);
-    if (!incident || incident.notifiedAt === null) return;
+    // Follow up whenever the channel heard about this incident, even if only the failure got through.
+    if (!incident || (incident.notifiedAt === null && !incident.failureSent)) {
+      incidents.delete(app);
+      return;
+    }
 
-    await notify({
+    const sent = await notify({
       app,
       title,
       message: `'${app}' is stable: all ${instances.length} instance(s) are online.\n(CPU avg: ${average(instances.map((p) => p.cpu))}%, Memory total: ${sum(instances.map((p) => p.memory))}MB)`,
       level: 'good',
     });
+    // An undelivered recovery keeps the incident open; closeRecoveredIncidents retries it.
+    if (!sent) return;
+    incidents.delete(app);
+    // This message already says every instance is online, so a separate
+    // "Process Back Online" for the same instances would only repeat it.
+    for (const p of instances) alerts.markResolved(`${instanceKey(p)}::status`);
   }
 
   /** Closes incidents whose watch failed but whose app has since become healthy. */

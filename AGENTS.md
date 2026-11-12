@@ -55,7 +55,11 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units
      `stopping` -> `errored`),
    - `repeat` after `alertRepeatMs` while it lasts (0 disables reminders),
    - `resolve` when it clears, but only if the alert was actually delivered.
-   Call `markSent` only after a successful send, so failed deliveries are retried.
+     The condition stays tracked until `markResolved`, so a failed resolve is
+     retried; if the problem returns first, it continues as the same alert.
+   Call `markSent` / `markResolved` only after a successful send, so failed
+   deliveries are retried. The same applies to incidents: "Restart Failed" is
+   marked as sent, and an incident closed, only after delivery.
    Do not reintroduce a plain time-based throttle.
 3. **Restarts are tracked per instance** (`<name>#<pm_id>`) and grouped per app.
    The first check after startup only sets the baseline. A lower restart count
@@ -67,14 +71,18 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units
 5. **Incidents** (`incidents` map) group a crash loop: after one "Restart
    Detected" and one "Restart Failed", later restarts are only logged until the
    app is stable ("Restart Successful" / "App Recovered") or the reminder
-   interval passes.
+   interval passes. The recovery message is sent if any alert of the incident
+   was delivered, and it resolves the instances' status alerts, so no separate
+   "Process Back Online" follows.
 6. **Never throw out of a cycle.** `notifier.send` returns `false` instead of
    throwing, `history.flush` logs instead of throwing, and `runCycle` turns PM2
    failures into the `monitor::pm2` condition. `runCycle` skips itself if the
    previous run is still in progress.
 7. **Config fails loudly.** Add new settings in `src/config.js` through the
    `string/number/boolean/list` helpers with explicit bounds; invalid values
-   must become an entry in `errors`, not a silent fallback. Document every new
+   must become an entry in `errors`, not a silent fallback. A deprecated or
+   ignored legacy value goes into `warnings`, which are printed at startup
+   (see `THROTTLE_DURATION_MS`). Document every new
    variable in `README.md` (configuration table) and `.env.example`.
 8. **HTTP server**: parse URLs against a fixed base (`http://localhost`), never
    the `Host` header (a malformed Host used to crash the process). `/status`

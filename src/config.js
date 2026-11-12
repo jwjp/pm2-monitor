@@ -3,6 +3,7 @@ import cron from 'node-cron';
 const TRUE_VALUES = ['1', 'true', 'yes', 'on'];
 const FALSE_VALUES = ['0', 'false', 'no', 'off'];
 const MINUTE_MS = 60 * 1000;
+const LEGACY_MIN_REPEAT_MS = 5 * MINUTE_MS;
 
 export const LOOPBACK_HOSTS = ['127.0.0.1', '::1', 'localhost'];
 
@@ -13,6 +14,7 @@ export const LOOPBACK_HOSTS = ['127.0.0.1', '::1', 'localhost'];
  */
 export function loadConfig(env = process.env, argv = []) {
   const errors = [];
+  const warnings = [];
   const flags = new Set(argv);
   const read = (name) => {
     const value = env[name];
@@ -50,6 +52,24 @@ export function loadConfig(env = process.env, argv = []) {
     return raw.split(',').map((item) => item.trim()).filter(Boolean);
   };
 
+  // THROTTLE_DURATION_MS is the 1.x name of ALERT_REPEAT_MS. It used to be a
+  // short throttle (30000 in the old .env.example); read as a reminder interval,
+  // such a value re-sends every ongoing alert at every check. Values below
+  // LEGACY_MIN_REPEAT_MS are therefore ignored with a warning.
+  const alertRepeatMs = () => {
+    const fallback = 30 * MINUTE_MS;
+    if (read('ALERT_REPEAT_MS') !== undefined) return number('ALERT_REPEAT_MS', fallback, { min: 0 });
+    if (read('THROTTLE_DURATION_MS') === undefined) return fallback;
+
+    const legacy = number('THROTTLE_DURATION_MS', fallback, { min: 0 });
+    if (legacy > 0 && legacy < LEGACY_MIN_REPEAT_MS) {
+      warnings.push(`THROTTLE_DURATION_MS=${legacy} is ignored: it now sets the reminder interval, and a value this short would repeat every alert at each check. Using ALERT_REPEAT_MS=${fallback}. Remove it or set ALERT_REPEAT_MS.`);
+      return fallback;
+    }
+    warnings.push('THROTTLE_DURATION_MS is deprecated. Rename it to ALERT_REPEAT_MS.');
+    return legacy;
+  };
+
   const dryRun = flags.has('--dry-run') || boolean('DRY_RUN', false);
 
   const config = {
@@ -68,8 +88,7 @@ export function loadConfig(env = process.env, argv = []) {
       memoryMb: number('MEMORY_THRESHOLD_MB', 450, { min: 0 }),
     },
     resourceAlertSamples: number('RESOURCE_ALERT_SAMPLES', 2, { min: 1, integer: true }),
-    // THROTTLE_DURATION_MS is the legacy name of this setting.
-    alertRepeatMs: number('ALERT_REPEAT_MS', number('THROTTLE_DURATION_MS', 30 * MINUTE_MS, { min: 0 }), { min: 0 }),
+    alertRepeatMs: alertRepeatMs(),
     recheck: {
       intervalMs: number('RECHECK_INTERVAL_MS', 5 * 1000, { min: 1000 }),
       maxAttempts: number('RECHECK_MAX_ATTEMPTS', 12, { min: 1, integer: true }),
@@ -94,7 +113,7 @@ export function loadConfig(env = process.env, argv = []) {
     errors.push(`CRON_TIMEZONE is not a valid IANA time zone: "${config.timezone}".`);
   }
 
-  return { config, errors };
+  return { config, errors, warnings };
 }
 
 export function isValidSlackWebhookUrl(value) {

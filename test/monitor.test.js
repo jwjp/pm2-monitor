@@ -172,6 +172,89 @@ test('alerts for removed instances are dropped silently', async () => {
   assert.deepEqual(t.titles(), ['Process Status Alert', 'Process Status Alert']);
 });
 
+test('an undelivered resolve is retried on the next check', async () => {
+  const t = setup({ processes: [proc('api', 0, { status: 'stopped' })] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0)];
+  t.state.deliver = false;
+  await t.monitor.runCycle();
+  t.state.deliver = true;
+  await t.monitor.runCycle();
+  await t.monitor.runCycle();
+
+  assert.deepEqual(t.titles(), ['Process Status Alert', 'Process Back Online', 'Process Back Online']);
+});
+
+test('an undelivered Restart Failed is retried at the next failure', async () => {
+  const t = setup({ processes: [proc('api', 0)] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1, status: 'errored' })];
+  t.state.beforePoll = () => { t.state.deliver = false; };
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  t.state.beforePoll = null;
+  t.state.deliver = true;
+  t.state.processes = [proc('api', 0, { restarts: 2, status: 'errored' })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Failed', 'Restart Failed']);
+});
+
+test('recovery is reported when only the failure alert got through', async () => {
+  const t = setup({ processes: [proc('api', 0)] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1, status: 'errored' })];
+  t.state.deliver = false;
+  t.state.beforePoll = () => { t.state.deliver = true; };
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1 })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Failed', 'App Recovered']);
+});
+
+test('an undelivered recovery is retried on the next check', async () => {
+  const t = setup({ processes: [proc('api', 0)] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1 })];
+  t.state.beforePoll = () => { t.state.deliver = false; };
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  t.state.beforePoll = null;
+  t.state.deliver = true;
+  await t.monitor.runCycle();
+  await t.monitor.runCycle();
+
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Successful', 'App Recovered']);
+});
+
+test('restarting a stopped app is not also reported as back online', async () => {
+  const t = setup({ processes: [proc('api', 0, { status: 'stopped' })] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1 })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+  await t.monitor.runCycle();
+
+  assert.deepEqual(t.titles(), ['Process Status Alert', 'Process Restart Detected', 'Restart Successful']);
+});
+
 test('formatDuration renders compact durations', () => {
   assert.equal(formatDuration(42 * 1000), '42s');
   assert.equal(formatDuration(5 * MINUTE), '5m');

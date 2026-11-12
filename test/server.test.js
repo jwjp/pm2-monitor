@@ -7,7 +7,7 @@ import { silentLogger } from './helpers.js';
 const history = {
   list: (limit = 3) => [{ timestamp: '3' }, { timestamp: '2' }, { timestamp: '1' }].slice(0, limit),
 };
-const getState = () => ({ lastCycleAt: null, running: false, watchingRestarts: [] });
+const getState = () => ({ lastCycleAt: null, running: false, watchingRestarts: ['api'] });
 
 async function start(options) {
   const server = createStatusServer({ history, getState, logger: silentLogger, ...options });
@@ -49,7 +49,16 @@ test('status is open on loopback without a token, with limit and latest', async 
 test('a non-loopback host requires a token', async () => {
   const base = await start({ host: '0.0.0.0' });
   assert.equal((await fetch(`${base}/status`)).status, 401);
-  assert.equal((await fetch(`${base}/healthz`)).status, 200);
+  const health = await fetch(`${base}/healthz`);
+  assert.equal(health.status, 200);
+  // App names are not shown to clients that cannot read /status.
+  assert.deepEqual(await health.json(), { ok: true, lastCycleAt: null, running: false });
+});
+
+test('healthz lists watched apps for authorized clients', async () => {
+  const base = await start({ host: '0.0.0.0', token: 's3cret' });
+  const health = await fetch(`${base}/healthz`, { headers: { Authorization: 'Bearer s3cret' } });
+  assert.deepEqual((await health.json()).watchingRestarts, ['api']);
 });
 
 test('a configured token is checked from the Authorization header only', async () => {

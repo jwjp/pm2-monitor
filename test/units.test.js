@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.js';
-import { parseJlist } from '../src/pm2.js';
+import { decodeConsoleOutput, parseJlist } from '../src/pm2.js';
 import { AlertTracker } from '../src/alerts.js';
 import { buildSlackPayload, createNotifier } from '../src/notifier.js';
 import { silentLogger } from './helpers.js';
@@ -73,6 +73,15 @@ test('pm2: parses jlist output and skips excluded apps', () => {
 test('pm2: tolerates notices printed before the JSON', () => {
   const stdout = '[PM2] In-memory PM2 is out-of-date, do:\n[PM2] $ pm2 update\n[{"pm_id":0,"name":"api","pm2_env":{"status":"online"}}]\n';
   assert.equal(parseJlist(stdout)[0].name, 'api');
+});
+
+test('pm2: cmd.exe messages in the console code page are decoded', async () => {
+  // "'pm2'은(는)" as cmd.exe prints it on Korean Windows (CP949).
+  const cp949 = Buffer.from([0x27, 0x70, 0x6d, 0x32, 0x27, 0xc0, 0xba, 0x28, 0xb4, 0xc2, 0x29]);
+  assert.equal(await decodeConsoleOutput(cp949, async () => 949), "'pm2'은(는)");
+  // Valid UTF-8 is kept as is, and an unknown code page does not throw.
+  assert.equal(await decodeConsoleOutput(Buffer.from('café'), async () => 949), 'café');
+  assert.equal(typeof await decodeConsoleOutput(cp949, async () => { throw new Error('no chcp'); }), 'string');
 });
 
 test('pm2: empty output is an empty list, garbage is an error', () => {

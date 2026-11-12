@@ -107,11 +107,17 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
   `fillMissingUsage` fills them from `src/usage.js` (PowerShell `Get-Process`)
   only for online processes with 0 memory, so hosts where PM2 works are
   untouched. CPU is the CPU-time delta between two readings of the same pid
-  (percent of one core, like PM2), so the first reading has no CPU value. Pids
-  are passed through an environment variable, never interpolated into the script.
+  (percent of one core, like PM2), so the first reading has no CPU value and
+  stays `null`. A failed or missing reading sets CPU and memory to `null`.
+  Resource checks skip a null sample: it does not start or clear an alert, and
+  it does not reset the consecutive-sample count. Pids are passed through an
+  environment variable, never interpolated into the script.
 - **Windows cannot deliver SIGINT** to the monitor, so `ecosystem.config.cjs`
   sets `shutdown_with_message` and `pm2-monitor.js` also shuts down on the
-  `'shutdown'` IPC message. Shutdown force-saves the history.
+  `'shutdown'` IPC message. Shutdown force-saves history before it waits for
+  restart watches. A watch blocked in `pm2 jlist` can outlast `kill_timeout`,
+  and the file is no longer rewritten on every check. A failed write clears
+  its timestamp so the next flush retries inside `saveIntervalMs`.
 - **cmd.exe messages use the console code page** (e.g. CP949), not UTF-8;
   `decodeConsoleOutput` handles that for `jlist` errors.
 - **dotenv does not override** variables already set in the process

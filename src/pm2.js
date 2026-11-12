@@ -36,18 +36,28 @@ export async function fillMissingUsage(processes, usageReader, logger = console)
     usage = await usageReader.read(missing.map((p) => p.pid));
     usageWarned = false;
   } catch (error) {
-    // Keep PM2's values; warn once per failure streak instead of every check.
+    // Unknown, not zero: a failed read must not look like the process went idle.
     if (!usageWarned) logger.warn(`[Warn] Could not read CPU/memory from Windows: ${error.message}`);
     usageWarned = true;
+    for (const proc of missing) markUsageUnknown(proc);
     return;
   }
 
   for (const proc of missing) {
     const found = usage.get(proc.pid);
-    if (!found) continue;
+    if (!found) {
+      markUsageUnknown(proc);
+      continue;
+    }
     proc.memory = roundMb(found.memoryBytes);
-    proc.cpu = found.cpu ?? 0;
+    // Null until a second reading of this pid exists. Zero would clear a high-CPU alert.
+    proc.cpu = found.cpu;
   }
+}
+
+function markUsageUnknown(proc) {
+  proc.cpu = null;
+  proc.memory = null;
 }
 
 async function runJlist(pm2Bin) {

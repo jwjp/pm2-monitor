@@ -111,7 +111,10 @@ GET /status/latest        the most recent snapshot, or null
 
 Each snapshot looks like
 `{"timestamp":"2026-11-12T02:31:00.017Z","processes":[{"pm_id":0,"name":"api","status":"online","restarts":3,"cpu":2,"memory":50,…}]}`.
-Timestamps are ISO 8601 in UTC; `memory` is in MB.
+Timestamps are ISO 8601 in UTC; `memory` is in MB. `cpu` and `memory` are
+`null` when the value could not be read (see the Windows note under
+[Known limitations](#known-limitations)); they are never reported as `0` in
+that case.
 
 By default the endpoint binds to `127.0.0.1`. If you set `HOST=0.0.0.0`, also
 set `STATUS_TOKEN`; otherwise `/status` answers 401. `/healthz` needs no token,
@@ -136,7 +139,7 @@ curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit
   `ALERT_REPEAT_MS` is always taken as given.
 - **The default `CRON_TIMEZONE` is now `Asia/Seoul`** (was `America/New_York`).
   The default schedule therefore runs 08:00–19:59 Korean time on weekdays, and
-  alert times are shown in KST. Set `CRON_TIMEZONE` to keep another zone.
+  alert times are shown in Korean time (as `GMT+9`). Set `CRON_TIMEZONE` to keep another zone.
 - **CPU and memory alerts wait for 2 consecutive checks** by default. Set
   `RESOURCE_ALERT_SAMPLES=1` for the old behavior.
 - **`.env` is read from the project directory**, not the working directory, and
@@ -156,8 +159,10 @@ curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit
   usage through `wmic`, which those builds no longer include. The monitor then
   reads usage from Windows itself (`WINDOWS_USAGE_FALLBACK`, on by default),
   which starts one PowerShell per check. CPU is measured between two readings,
-  so the first check after a process starts shows 0% CPU. `/status` history
-  contains the corrected values; `pm2 ls` still shows 0.
+  so the first check after a process starts has `cpu: null`. A failed lookup
+  leaves both `cpu` and `memory` as `null` for that check. Those samples are
+  skipped, so they do not raise or clear a resource alert. `/status` history
+  contains these values; `pm2 ls` still shows 0.
 - **A crash loop may never become `errored`.** PM2 only counts a restart against
   `max_restarts` when the process lived shorter than `min_uptime` (1s by
   default). An app that crashes after a few seconds keeps restarting while

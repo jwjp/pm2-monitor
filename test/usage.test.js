@@ -64,7 +64,7 @@ test('pm2: only online processes that PM2 reports with 0 memory are filled in', 
   assert.deepEqual([processes[1].cpu, processes[1].memory], [5, 80]);
 });
 
-test('pm2: a failing usage reader keeps PM2 values and warns once', async () => {
+test('pm2: a failing usage reader marks usage unknown and warns once', async () => {
   const warnings = [];
   const logger = { ...silentLogger, warn: (line) => warnings.push(line) };
   const reader = { read: async () => { throw new Error('powershell missing'); } };
@@ -73,9 +73,22 @@ test('pm2: a failing usage reader keeps PM2 values and warns once', async () => 
   await fillMissingUsage(processes, reader, logger);
   await fillMissingUsage(processes, reader, logger);
 
-  assert.equal(processes[0].memory, 0);
+  assert.deepEqual([processes[0].cpu, processes[0].memory], [null, null]);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /powershell missing/);
+});
+
+test('pm2: a missing pid and a first CPU reading stay unknown', async () => {
+  const processes = [
+    proc('api', 0, { pid: 11, cpu: 0, memory: 0 }),
+    proc('api', 1, { pid: 12, cpu: 0, memory: 0 }),
+  ];
+  const reader = { read: async () => new Map([[11, { cpu: null, memoryBytes: 150 * MB }]]) };
+
+  await fillMissingUsage(processes, reader, silentLogger);
+
+  assert.deepEqual([processes[0].cpu, processes[0].memory], [null, 150]);
+  assert.deepEqual([processes[1].cpu, processes[1].memory], [null, null]);
 });
 
 test('history: saved at most every saveIntervalMs, and always when forced', async (t) => {
@@ -104,4 +117,21 @@ test('history: saved at most every saveIntervalMs, and always when forced', asyn
   history.add({ timestamp: '4' });
   await history.flush({ force: true });
   assert.equal(await saved(), 4);
+});
+
+test('history: a failed save is retried inside the interval', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pm2-monitor-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'missing', 'history.json');
+  let clock = 0;
+  const history = createHistory({ file, maxEntries: 10, saveIntervalMs: 60000, now: () => clock, logger: silentLogger });
+
+  history.add({ timestamp: '1' });
+  await history.flush();
+  await assert.rejects(fs.access(file));
+
+  await fs.mkdir(path.dirname(file));
+  clock = 1000;
+  await history.flush();
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf-8')), [{ timestamp: '1' }]);
 });

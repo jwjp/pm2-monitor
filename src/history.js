@@ -55,7 +55,10 @@ export function createHistory({ file, maxEntries, saveIntervalMs = 0, now = () =
           await fs.rename(tmpFile, file);
         } catch (error) {
           logger.error(`[Error] Failed to write ${file}: ${error.message}`);
-          dirty = true; // Retried at the next flush.
+          dirty = true;
+          // savedAt was set before the write. Clear it so the next flush retries
+          // inside the interval instead of waiting out a save that never landed.
+          savedAt = null;
           await fs.rm(tmpFile, { force: true }).catch(() => {});
         }
       });

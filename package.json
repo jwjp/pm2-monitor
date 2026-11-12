@@ -1,7 +1,7 @@
 {
   "name": "pm2-monitor",
-  "version": "3.1.0",
-  "description": "Monitors PM2 processes and sends Slack alerts for restarts, status problems and high resource usage.",
+  "version": "3.2.0",
+  "description": "Monitors PM2 processes and sends Slack and Discord alerts for restarts, status problems and high resource usage.",
   "main": "pm2-monitor.js",
   "type": "module",
   "scripts": {

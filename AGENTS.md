@@ -8,8 +8,10 @@ the code works and how to change it safely.
 
 A Node.js (ESM, Node >= 18) service that runs under PM2, polls `pm2 jlist` on a
 cron schedule, and sends Slack alerts for restarts, non-`online` status, and
-high CPU/memory. It sends a follow-up when each problem clears, and can serve
-the status history as JSON over HTTP.
+high CPU/memory. It sends a follow-up when each problem clears, reports apps
+that leave the process list, can attach the end of an app's error log to
+restart alerts, pings an optional heartbeat URL, and can serve the status
+history as JSON over HTTP.
 
 Runtime dependencies are only `axios`, `dotenv` and `node-cron`. Do not add
 dependencies without a clear need; tests use Node's built-in `node:test`.
@@ -38,6 +40,8 @@ src/config.js      loadConfig(env, argv) -> { config, errors, warnings }; pure, 
 src/pm2.js         listPm2Processes(config, { usageReader }), parseJlist(stdout, excludedApps),
                    fillMissingUsage, decodeConsoleOutput (cmd.exe code page)
 src/usage.js       createWindowsUsageReader({ run, now }): CPU/memory via Get-Process
+src/logs.js        readLogTail(file, lines): end of a log file, reads only the last 64 KB
+src/heartbeat.js   createHeartbeat({ url, timeoutMs }).ping() -> Promise<boolean>
 src/monitor.js     createMonitor({...}): restart detection, restart watches,
                    status/resource conditions, incidents; the core logic
 src/alerts.js      AlertTracker: per-condition state (fire / repeat / resolve)
@@ -47,14 +51,16 @@ src/history.js     in-memory history (newest first), atomic JSON file persistenc
 src/server.js      createStatusServer({...}): /healthz, /status, /status/latest
 test/helpers.js    setup(): monitor with fake PM2 state, clock, sleep and notifier
 test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
-                   usage reader and history persistence
+                   usage reader and history persistence, log tail and heartbeat
+                   (operations.test.js)
 ```
 
 ## Design rules (keep these when changing code)
 
 1. **Inject side effects.** `createMonitor` receives `listProcesses`, `notifier`,
-   `history`, `now`, `sleep` and `logger`. Never call PM2, Slack, `Date.now()` or
-   timers directly inside `src/monitor.js`; otherwise the tests cannot control them.
+   `history`, `heartbeat`, `readLog`, `now`, `sleep` and `logger`. Never call
+   PM2, Slack, the file system, `Date.now()` or timers directly inside
+   `src/monitor.js`; otherwise the tests cannot control them.
 2. **One alert per problem.** Every condition goes through `AlertTracker` with a
    stable key: `"<app>#<pm_id>::status|cpu|memory"` or `"monitor::pm2"`.
    - `fire` when a condition starts or its signature changes (e.g. status
@@ -99,10 +105,26 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
    ignored legacy value goes into `warnings`, which are printed at startup
    (see `THROTTLE_DURATION_MS`). Document every new
    variable in `README.md` (configuration table) and `.env.example`.
-8. **HTTP server**: parse URLs against a fixed base (`http://localhost`), never
-   the `Host` header (a malformed Host used to crash the process). `/status`
-   needs a Bearer token compared with `timingSafeEqual`, or a loopback bind
-   address when no token is set. Do not accept tokens in query strings.
+8. **Ignored statuses** (`IGNORE_STATUSES`) count as healthy (`isHealthy`):
+   they raise no status alert, an open one resolves as "Process Status
+   Cleared" (not "Back Online"), and they do not fail a restart watch. Recovery
+   still needs at least one `online` instance; if every instance is in an
+   ignored status, the watch and incident end without a message.
+9. **Removed apps** (`detectRemovedApps`): an app name in the previous check
+   but not in this one sends "App Removed" once, retried until delivered unless
+   the app returns first. It is per app, not per instance, so scaling down is
+   silent. An app under a restart watch is left to the watch; a delivered
+   "Restart Failed" for an app that left the list suppresses "App Removed".
+10. **Log excerpts and heartbeat are best effort.** `logExcerpt` returns `''`
+    when `RESTART_LOG_LINES` is 0 or the log cannot be read (warning logged);
+    the alert is sent anyway. `heartbeat.ping()` runs only after a check that
+    read PM2, never throws, warns once per outage, and logs only the URL's
+    origin because heartbeat URLs carry a token. Dry and one-off runs get no
+    heartbeat, so a manual check cannot mask a dead scheduled monitor.
+11. **HTTP server**: parse URLs against a fixed base (`http://localhost`), never
+    the `Host` header (a malformed Host used to crash the process). `/status`
+    needs a Bearer token compared with `timingSafeEqual`, or a loopback bind
+    address when no token is set. Do not accept tokens in query strings.
 
 ## Platform gotchas
 
@@ -142,7 +164,9 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
   `await t.monitor.idle()` for restart watches, then assert on `t.titles()` /
   `t.sent`. `t.advance(ms)` moves the fake clock; `t.state.beforePoll` runs
   before each watch poll; `t.state.fail` makes PM2 fail; `deliver: false` /
-  `t.state.deliver` simulates Slack failures.
+  `t.state.deliver` simulates Slack failures. `t.state.logs[path] = [lines]`
+  provides error logs (give the process an `errLogPath`), and `t.state.pings`
+  counts heartbeats.
 - To check against a **real PM2 without touching the user's PM2**, install PM2
   in a temporary directory and isolate its daemon with `PM2_HOME`:
 

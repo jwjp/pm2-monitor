@@ -17,6 +17,12 @@ attention, and sends a follow-up when the problem clears.
 - **Strict configuration.** Invalid settings stop the monitor at startup with a
   message that names the variable, instead of falling back to a default without
   telling you.
+- **Error log excerpts** (opt-in, `RESTART_LOG_LINES`): restart alerts show the
+  end of the app's PM2 error log, so the crash reason is visible in Slack.
+- **Heartbeat** (`HEARTBEAT_URL`): an external service such as Healthchecks.io
+  or an Uptime Kuma push monitor alerts you when the monitor itself stops.
+- **Removed apps are reported**, and statuses you do not care about (for
+  example `stopped` for apps stopped on purpose) can be ignored.
 - **Dry-run mode** to try the monitor without Slack.
 - Optional local JSON endpoint with status history (`/status`, `/status/latest`, `/healthz`).
 
@@ -66,8 +72,14 @@ The script also accepts `--once` and `--dry-run` directly:
 | Restart Successful / Restart Failed | Result of the follow-up checks after a restart. |
 | App Recovered | An app whose restart check failed is healthy again, or an app that relapsed has stayed up for `INCIDENT_STABLE_MS`. |
 | Process Status Alert → Process Back Online | An instance is not `online` (a change such as `stopping` → `errored` is a new alert). Not sent for a status that "Restart Failed" already reported; its reminders still are. |
+| Process Status Cleared | An instance with an open status alert moved to a status in `IGNORE_STATUSES` (e.g. `errored` → `stopped`). |
+| App Removed | Every instance of an app left the PM2 process list (`pm2 delete`, or PM2 restarted without it). Its open alerts are closed. Scaling down is not reported. |
 | High CPU / Memory Usage → Back to Normal | Above the threshold for `RESOURCE_ALERT_SAMPLES` checks in a row. |
 | Monitoring Failed → Monitoring Recovered | `pm2 jlist` could not be run or parsed. |
+
+With `RESTART_LOG_LINES` set, "Process Restart Detected" and "Restart Failed"
+end with the last lines of the instance's PM2 error log (`pm2 logs --err`),
+cut to about 1500 characters.
 
 The first check after startup only records restart counts, so restarts that
 happened before the monitor started are not reported. Checks run only on the
@@ -84,12 +96,16 @@ is reported at the first check of the next morning (the alert says since when).
 | `CRON_SCHEDULE` | `*/1 8-19 * * 1-5` | Check schedule in node-cron syntax. |
 | `CRON_TIMEZONE` | `Asia/Seoul` | IANA time zone for the schedule and alert times. |
 | `EXCLUDED_APPS` | `pm2-monitor,pm2-logrotate` | Comma-separated PM2 app names to ignore. |
+| `IGNORE_STATUSES` | empty | Comma-separated PM2 statuses that are not reported, e.g. `stopped`. Allowed: `stopped`, `stopping`, `launching`, `errored`, `one-launch-status`, `waiting restart`. An instance in such a status also counts as fine for restart checks. Note that an app with `autorestart: false` that crashes is `stopped` too. |
 | `WINDOWS_USAGE_FALLBACK` | `true` | Windows only: when PM2 reports 0 memory for an online process, read CPU/memory from Windows (`Get-Process`) instead. |
 | `CPU_THRESHOLD` | `80` | CPU percentage alert threshold. |
 | `MEMORY_THRESHOLD_MB` | `450` | Memory alert threshold in MB. |
 | `RESOURCE_ALERT_SAMPLES` | `2` | Consecutive checks above a threshold before alerting. |
 | `ALERT_REPEAT_MS` | `1800000` (30 min) | Reminder interval while a problem lasts; `0` turns reminders off. `THROTTLE_DURATION_MS` is accepted as the old name (values under 5 min are ignored with a warning). |
 | `INCIDENT_STABLE_MS` | `600000` (10 min) | How long an app must stay up after a restart before the incident closes. A restart within this time is reported once as a relapse, and later ones are logged until the app stays up this long. `0` closes the incident at the first success. |
+| `RESTART_LOG_LINES` | `0` (off) | Lines of the app's error log to attach to restart alerts (max 50). Logs can contain secrets and are sent to Slack, so this is off by default. |
+| `HEARTBEAT_URL` | empty | URL requested (GET) after every check that could read PM2. See [Heartbeat](#heartbeat). Not used by dry or one-off runs. |
+| `HEARTBEAT_TIMEOUT_MS` | `10000` | Heartbeat request timeout. |
 | `RECHECK_INTERVAL_MS` | `5000` | Interval between follow-up checks after a restart (min 1000). |
 | `RECHECK_MAX_ATTEMPTS` | `12` | Number of follow-up checks after a restart. |
 | `SLACK_TIMEOUT_MS` | `10000` | Slack request timeout. |
@@ -101,6 +117,24 @@ is reported at the first check of the next morning (the alert says since when).
 | `MAX_HISTORY` | `1440` | Number of snapshots to keep. |
 | `STATUS_SAVE_INTERVAL_MS` | `300000` (5 min) | How often the history file is rewritten; `0` saves after every check. Unsaved snapshots are written on shutdown. |
 | `STATUS_TOKEN` | empty | Bearer token for `/status`. Required when `HOST` is not a loopback address. |
+
+## Heartbeat
+
+The monitor cannot report that it has stopped, so pair it with a heartbeat
+("dead man's switch") service: Healthchecks.io, an Uptime Kuma push monitor,
+Better Stack, Cronitor and similar. Create a check there, then set its ping URL:
+
+```bash
+HEARTBEAT_URL=https://hc-ping.com/<your-uuid>
+```
+
+The URL is requested after every check that could read PM2, so the service
+alerts you when the monitor process dies, hangs, or loses access to PM2 (that
+last case also sends "Monitoring Failed" to Slack). Configure the check with
+the same schedule as `CRON_SCHEDULE`; with the default business-hours schedule,
+a plain "every minute" check would alert every night. Healthchecks.io accepts
+the cron expression and time zone directly. The URL is treated as a secret:
+logs show only its origin.
 
 ## Status endpoint
 
@@ -126,6 +160,13 @@ start the endpoint nor write `status-history.json`.
 ```bash
 curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit=5
 ```
+
+## Upgrading from 2.x
+
+- **"App Removed" is new.** Deleting an app from PM2 (or restarting PM2 without
+  it) now sends one alert; it used to be silent.
+- Everything else is opt-in: `IGNORE_STATUSES`, `RESTART_LOG_LINES` and
+  `HEARTBEAT_URL` are off by default.
 
 ## Upgrading from 1.x
 
@@ -194,6 +235,8 @@ pm2-monitor.js     entry point: loads .env, wires everything, schedules checks
 src/config.js      reads and validates settings
 src/pm2.js         runs `pm2 jlist` and normalizes its output
 src/usage.js       CPU/memory from Windows when PM2 cannot read them
+src/logs.js        reads the end of an app's error log for restart alerts
+src/heartbeat.js   pings HEARTBEAT_URL after each successful check
 src/monitor.js     restart detection, follow-up checks, status/resource alerts
 src/alerts.js      alert state (start, reminder, resolve)
 src/notifier.js    Slack payloads and delivery (or dry-run logging)
@@ -205,6 +248,8 @@ test/              tests (npm test)
 ## Security notes
 
 - Do not commit real Slack webhook URLs. Keep `.env` private; `.env.example` is safe to commit.
+- `RESTART_LOG_LINES` sends lines of your apps' error logs to Slack. Enable it
+  only if those logs do not contain secrets or personal data.
 - `status-history.json` is runtime data and is ignored by Git.
 - Keep dependencies patched with Dependabot and `npm audit`.
 

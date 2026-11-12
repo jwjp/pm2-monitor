@@ -319,15 +319,166 @@ test('stop lets a running check finish and skips later ones', async () => {
   assert.equal((await t.monitor.runCycle()).skipped, true);
 });
 
-test('alerts for removed instances are dropped silently', async () => {
-  const t = setup({ processes: [proc('api', 0, { status: 'stopped' })] });
+test('a removed app is reported once and its alerts are closed', async () => {
+  const t = setup({ processes: [proc('api', 0, { status: 'stopped' }), proc('api', 1, { status: 'stopped' })] });
   await t.monitor.runCycle();
   t.state.processes = [];
+  await t.monitor.runCycle();
   await t.monitor.runCycle();
   t.state.processes = [proc('api', 0, { status: 'stopped' })];
   await t.monitor.runCycle();
 
-  assert.deepEqual(t.titles(), ['Process Status Alert', 'Process Status Alert']);
+  assert.deepEqual(t.titles(), ['Process Status Alert', 'Process Status Alert', 'App Removed', 'Process Status Alert']);
+  assert.match(t.sent[2].message, /'api' \(2 instance\(s\)\) is no longer in the PM2 process list/);
+});
+
+test('scaling an app down is not reported as removed', async () => {
+  const t = setup({ processes: [proc('api', 0), proc('api', 1), proc('web', 2)] });
+  await t.monitor.runCycle();
+  t.state.processes = [proc('api', 0), proc('web', 2)];
+  await t.monitor.runCycle();
+
+  assert.deepEqual(t.titles(), []);
+});
+
+test('an undelivered App Removed is retried, unless the app comes back first', async () => {
+  const t = setup({ processes: [proc('api', 0), proc('web', 1)] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [];
+  t.state.deliver = false;
+  await t.monitor.runCycle();
+  t.state.deliver = true;
+  t.state.processes = [proc('web', 1)];
+  await t.monitor.runCycle();
+  await t.monitor.runCycle();
+
+  // Both removals failed to send; web came back before the retry, api did not.
+  assert.deepEqual(t.sent.map((alert) => `${alert.title}:${alert.app}`), ['App Removed:api', 'App Removed:web', 'App Removed:api']);
+});
+
+test('an app that leaves during a restart watch is reported only by Restart Failed', async () => {
+  const t = setup({ env: { RECHECK_MAX_ATTEMPTS: '2' }, processes: [proc('api', 0)] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1 })];
+  t.state.beforePoll = () => { t.state.processes = []; };
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+  t.state.beforePoll = null;
+  await t.monitor.runCycle();
+
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Failed']);
+  assert.match(t.sent[1].message, /no longer in the PM2 process list/);
+});
+
+test('IGNORE_STATUSES silences a status and clears an open alert', async () => {
+  const t = setup({ env: { IGNORE_STATUSES: 'stopped' }, processes: [proc('api', 0, { status: 'stopped' })] });
+  await t.monitor.runCycle();
+  assert.deepEqual(t.titles(), []);
+
+  t.state.processes = [proc('api', 0, { status: 'errored' })];
+  await t.monitor.runCycle();
+  t.state.processes = [proc('api', 0, { status: 'stopped' })];
+  await t.monitor.runCycle();
+  await t.monitor.runCycle();
+
+  assert.deepEqual(t.titles(), ['Process Status Alert', 'Process Status Cleared']);
+  assert.match(t.sent[1].message, /now `stopped`, which IGNORE_STATUSES excludes/);
+});
+
+test('an instance in an ignored status does not fail a restart watch', async () => {
+  const t = setup({ env: { IGNORE_STATUSES: 'stopped' }, processes: [proc('api', 0), proc('api', 1, { status: 'stopped' })] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1 }), proc('api', 1, { status: 'stopped' })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Successful']);
+  assert.match(t.sent[1].message, /1 of 2 instance\(s\) are online, the others are stopped \(ignored\)/);
+  assert.match(t.sent[1].message, /Memory total: 50MB/);
+});
+
+test('an app stopped during its restart watch ends the watch quietly', async () => {
+  const t = setup({ env: { IGNORE_STATUSES: 'stopped' }, processes: [proc('api', 0)] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1 })];
+  t.state.beforePoll = () => { t.state.processes = [proc('api', 0, { restarts: 1, status: 'stopped' })]; };
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+  await t.monitor.runCycle();
+
+  assert.deepEqual(t.titles(), ['Process Restart Detected']);
+});
+
+test('restart alerts carry the end of the error log when RESTART_LOG_LINES is set', async () => {
+  const log = '/logs/api-error-0.log';
+  const t = setup({ env: { RESTART_LOG_LINES: '2' }, processes: [proc('api', 0, { errLogPath: log })] });
+  t.state.logs[log] = ['old line', 'Error: boom', '    at main (app.js:1:1) ```'];
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1, status: 'errored', errLogPath: log })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Failed']);
+  for (const alert of t.sent) {
+    assert.match(alert.message, /Last 2 line\(s\) of the error log of instance 0:\n```\nError: boom\n {4}at main \(app\.js:1:1\) '''\n```$/);
+    assert.doesNotMatch(alert.message, /old line/);
+  }
+});
+
+test('the error log is off by default, and an unreadable log only drops the excerpt', async () => {
+  const t = setup({ processes: [proc('api', 0, { errLogPath: '/logs/a.log' })] });
+  t.state.logs['/logs/a.log'] = ['Error: boom'];
+  await t.monitor.runCycle();
+  t.state.processes = [proc('api', 0, { restarts: 1, errLogPath: '/logs/a.log' })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+  assert.doesNotMatch(t.sent[0].message, /error log/);
+
+  const u = setup({ env: { RESTART_LOG_LINES: '5' }, processes: [proc('api', 0, { errLogPath: '/missing.log' })] });
+  await u.monitor.runCycle();
+  u.state.processes = [proc('api', 0, { restarts: 1, errLogPath: '/missing.log' })];
+  u.advance(MINUTE);
+  await u.monitor.runCycle();
+  await u.monitor.idle();
+  assert.deepEqual(u.titles(), ['Process Restart Detected', 'Restart Successful']);
+  assert.doesNotMatch(u.sent[0].message, /error log/);
+});
+
+test('a long error log is cut to fit the alert, keeping the newest lines', async () => {
+  const log = '/logs/api.log';
+  const t = setup({ env: { RESTART_LOG_LINES: '50' }, processes: [proc('api', 0, { errLogPath: log })] });
+  t.state.logs[log] = Array.from({ length: 50 }, (_, i) => `line ${i} ${'x'.repeat(200)}`);
+  await t.monitor.runCycle();
+  t.state.processes = [proc('api', 0, { restarts: 1, errLogPath: log })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  const excerpt = t.sent[0].message.split('```\n')[1];
+  assert.ok(excerpt.length <= 1500 + '\n```'.length);
+  assert.match(excerpt, /^line 4\d x+\n/);
+  assert.match(excerpt, /line 49 x+\n```$/);
+});
+
+test('the heartbeat is sent after each check that could read PM2', async () => {
+  const t = setup({ processes: [proc('api', 0)] });
+  await t.monitor.runCycle();
+  t.state.fail = new Error('pm2 down');
+  await t.monitor.runCycle();
+  t.state.fail = null;
+  await t.monitor.runCycle();
+
+  assert.equal(t.state.pings, 2);
 });
 
 test('an undelivered resolve is retried on the next check', async () => {

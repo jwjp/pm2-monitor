@@ -3,17 +3,21 @@ import { AlertTracker } from './alerts.js';
 import { formatTime } from './notifier.js';
 
 const MONITOR_KEY = 'monitor::pm2';
+// Slack cuts a section at 3000 characters; the log excerpt must leave room for the message.
+const LOG_EXCERPT_MAX_CHARS = 1500;
 
 /**
  * Creates the monitor. All side effects (PM2 access, notifications, history,
- * time and sleeping) are injected so the behavior can be tested without PM2 or
- * Slack.
+ * heartbeat, log reading, time and sleeping) are injected so the behavior can
+ * be tested without PM2 or Slack.
  */
 export function createMonitor({
   config,
   listProcesses,
   notifier,
   history = null,
+  heartbeat = null,
+  readLog = null, // (file, lines) => Promise<string[]>, see src/logs.js
   logger = console,
   now = () => Date.now(),
   sleep = (ms, signal) => delay(ms, undefined, { signal }),
@@ -23,6 +27,11 @@ export function createMonitor({
   const breaches = new Map(); // condition key -> consecutive threshold breaches
   const watches = new Map(); // app name -> running restart watch
   const incidents = new Map(); // app name -> { notifiedAt, restarts }
+  let knownApps = new Map(); // app name -> instance count at the last check
+  const removedApps = new Map(); // app name -> instance count, while "App Removed" is undelivered
+  const ignored = new Set(config.ignoreStatuses);
+  // Healthy for watches and recoveries: online, or in a status the user chose to ignore.
+  const isHealthy = (p) => p.status === 'online' || ignored.has(p.status);
   const controller = new AbortController();
   let running = false;
   let lastCycleAt = null;
@@ -86,12 +95,14 @@ export function createMonitor({
       const restartedApps = await detectRestarts(processes, startedAt);
       await closeRecoveredIncidents(processes, restartedApps);
       await checkInstances(processes);
+      await detectRemovedApps(processes);
 
       if (history) {
         history.add({ timestamp: new Date(startedAt).toISOString(), processes });
         await history.flush();
       }
       lastCycleAt = startedAt;
+      await heartbeat?.ping();
       return { ok: true, processes };
     } finally {
       running = false;
@@ -111,9 +122,10 @@ export function createMonitor({
       // New instances only set a baseline; a lower count means PM2 was reset.
       if (previous === undefined || proc.restarts <= previous) continue;
 
-      const entry = restarted.get(proc.name) ?? { count: 0, ids: [] };
+      const entry = restarted.get(proc.name) ?? { count: 0, ids: [], procs: [] };
       entry.count += proc.restarts - previous;
       entry.ids.push(proc.pm_id);
+      entry.procs.push(proc);
       restarted.set(proc.name, entry);
     }
 
@@ -121,15 +133,15 @@ export function createMonitor({
       if (!live.has(key)) restartBaseline.delete(key);
     }
 
-    for (const [app, { count, ids }] of restarted) {
+    for (const [app, restart] of restarted) {
       const reference = new Map(processes.filter((p) => p.name === app).map((p) => [p.pm_id, p.restarts]));
-      await handleRestart(app, count, ids, reference, startedAt);
+      await handleRestart(app, restart, reference, startedAt);
     }
 
     return new Set(restarted.keys());
   }
 
-  async function handleRestart(app, count, ids, reference, detectedAt) {
+  async function handleRestart(app, { count, ids, procs }, reference, detectedAt) {
     const incident = incidents.get(app) ?? newIncident();
     incidents.set(app, incident);
     incident.restarts += count;
@@ -159,7 +171,7 @@ export function createMonitor({
       const message = relapse
         ? `'${app}' restarted again ${formatDuration(incident.relapseAfter)} after it was reported stable: ${count} restart(s) (instance ${ids.join(', ')})${since}.${total}\nFurther restarts are only logged${reminder}, until it stays up for ${formatDuration(config.incidentStableMs)}.`
         : `Detected ${count} restart(s) of '${app}' (instance ${ids.join(', ')})${since}.${total}\nWatching for up to ${watchSeconds()} seconds.`;
-      const sent = await notify({ app, title: 'Process Restart Detected', message, level: 'warning' });
+      const sent = await notify({ app, title: 'Process Restart Detected', message: message + await logExcerpt(procs), level: 'warning' });
       if (sent) {
         incident.notifiedAt = detectedAt;
         incident.relapseAfter = null;
@@ -211,11 +223,17 @@ export function createMonitor({
       }
       extraRestarts += newRestarts;
 
-      const allOnline = instances.length > 0 && instances.every((p) => p.status === 'online');
+      const allHealthy = instances.length > 0 && instances.every(isHealthy);
       logger.log(`[Restart] Check ${attempt}/${maxAttempts} for '${app}': ${describeInstances(instances)}`);
 
-      if (allOnline && newRestarts === 0) {
-        await handleRecovered(app, instances);
+      if (allHealthy && newRestarts === 0) {
+        if (online(instances).length > 0) {
+          await handleRecovered(app, instances);
+        } else {
+          // Every instance is in an ignored status, e.g. stopped on purpose after the restart.
+          logger.log(`[Restart] '${app}' is ${describeStatuses(instances)} (IGNORE_STATUSES). Ending the watch.`);
+          incidents.delete(app);
+        }
         return;
       }
       if (instances.some((p) => p.status === 'errored')) break;
@@ -231,10 +249,11 @@ export function createMonitor({
     const incident = incidents.get(app);
     if (incident && incident.notifiedAt !== null && incident.failureNotifiedAt === incident.notifiedAt) return;
 
+    const failing = instances.filter((p) => !isHealthy(p));
     const sent = await notify({
       app,
       title: 'Restart Failed',
-      message: `'${app}' did not become stable after the restart.\n${details.join('\n')}`,
+      message: `'${app}' did not become stable after the restart.\n${details.join('\n')}${await logExcerpt(failing.length > 0 ? failing : instances)}`,
       level: 'danger',
     });
     // Only a delivered failure suppresses later ones, so a failed send is retried.
@@ -246,9 +265,9 @@ export function createMonitor({
     // status alert, so the next check does not send "Process Status Alert" for
     // the same state; reminders and a later status change still go out.
     if (sent) {
-      for (const p of instances) {
-        if (p.status !== 'online') alerts.adopt(`${instanceKey(p)}::status`, p.status, now());
-      }
+      for (const p of failing) alerts.adopt(`${instanceKey(p)}::status`, p.status, now());
+      // "Restart Failed" already said the app left the process list; no "App Removed" follows.
+      if (instances.length === 0) knownApps.delete(app);
     }
   }
 
@@ -279,7 +298,7 @@ export function createMonitor({
       const sent = await notify({
         app,
         title: 'App Recovered',
-        message: `'${app}' has stayed up for ${formatDuration(stableFor)} after ${incident.restarts} restart(s): all ${instances.length} instance(s) are online.\n(${usageSummary(instances)})`,
+        message: `'${app}' has stayed up for ${formatDuration(stableFor)} after ${incident.restarts} restart(s): ${describeOnline(instances)}.\n(${usageSummary(online(instances))})`,
         level: 'good',
       });
       if (sent) closeIncident(app, instances);
@@ -290,7 +309,7 @@ export function createMonitor({
       const sent = await notify({
         app,
         title,
-        message: `'${app}' is stable: all ${instances.length} instance(s) are online.\n(${usageSummary(instances)})`,
+        message: `'${app}' is stable: ${describeOnline(instances)}.\n(${usageSummary(online(instances))})`,
         level: 'good',
       });
       // An undelivered recovery keeps the incident open; closeRecoveredIncidents retries it.
@@ -317,12 +336,62 @@ export function createMonitor({
     for (const app of [...incidents.keys()]) {
       if (restartedApps.has(app) || watches.has(app)) continue;
       const instances = processes.filter((p) => p.name === app);
-      if (instances.length === 0) {
-        incidents.delete(app);
-      } else if (instances.every((p) => p.status === 'online')) {
-        await handleRecovered(app, instances, 'App Recovered');
-      }
+      if (!instances.every(isHealthy)) continue;
+      // Gone, or only in ignored statuses: nothing is left to recover.
+      if (online(instances).length === 0) incidents.delete(app);
+      else await handleRecovered(app, instances, 'App Recovered');
     }
+  }
+
+  /**
+   * Reports an app that was in the last check but is gone now: deleted, or PM2
+   * came back with another process list. Instances that disappear while others
+   * of the app remain (scaling down) are not reported. An app under a restart
+   * watch is left to the watch, which reports it in "Restart Failed".
+   */
+  async function detectRemovedApps(processes) {
+    const current = new Map();
+    for (const p of processes) current.set(p.name, (current.get(p.name) ?? 0) + 1);
+
+    const next = new Map(current);
+    for (const [app, count] of knownApps) {
+      if (current.has(app)) continue;
+      if (watches.has(app)) next.set(app, count);
+      else removedApps.set(app, count);
+    }
+    knownApps = next;
+    for (const app of current.keys()) removedApps.delete(app);
+
+    for (const [app, count] of [...removedApps]) {
+      const sent = await notify({
+        app,
+        title: 'App Removed',
+        message: `'${app}' (${count} instance(s)) is no longer in the PM2 process list. It was deleted, or PM2 restarted without it (for example \`pm2 kill\` without \`pm2 resurrect\`). Its open alerts are closed.`,
+        level: 'warning',
+      });
+      // Kept until delivered, unless the app comes back first.
+      if (sent) removedApps.delete(app);
+    }
+  }
+
+  /** The end of an instance's error log as a code block for an alert; '' when off or unreadable. */
+  async function logExcerpt(instances) {
+    if (!readLog || config.restartLogLines === 0) return '';
+    const proc = instances.find((p) => p.errLogPath);
+    if (!proc) return '';
+
+    let lines;
+    try {
+      lines = await readLog(proc.errLogPath, config.restartLogLines);
+    } catch (error) {
+      logger.warn(`[Warn] Could not read the error log of '${proc.name}' (${proc.errLogPath}): ${error.message}`);
+      return '';
+    }
+    // Triple backticks inside the log would end the code block early.
+    lines = lines.map((line) => line.replace(/```/g, "'''"));
+    while (lines.length > 0 && lines.join('\n').length > LOG_EXCERPT_MAX_CHARS) lines = lines.slice(1);
+    if (lines.length === 0) return '';
+    return `\nLast ${lines.length} line(s) of the error log of instance ${proc.pm_id}:\n\`\`\`\n${lines.join('\n')}\n\`\`\``;
   }
 
   async function checkInstances(processes) {
@@ -337,12 +406,18 @@ export function createMonitor({
       const { name, pm_id: id, status, cpu, memory } = proc;
       logger.log(`[Check] ${name}(${id}): ${status}, CPU ${formatUsage(cpu, '%')}, Memory ${formatUsage(memory, 'MB')}`);
 
-      const online = status === 'online';
-      await handleCondition(`${key}::status`, !online, status, (action, since) => (action === 'resolve'
-        ? { app: name, title: 'Process Back Online', message: `Instance \`${id}\` is online again after ${formatDuration(now() - since)}.`, level: 'good' }
-        : { app: name, title: action === 'repeat' ? 'Process Still Down' : 'Process Status Alert', message: `Instance \`${id}\` has status \`${status}\`${ongoing(action, since)}.`, level: 'danger' }));
+      const isOnline = status === 'online';
+      await handleCondition(`${key}::status`, !isHealthy(proc), status, (action, since) => {
+        if (action === 'resolve' && isOnline) {
+          return { app: name, title: 'Process Back Online', message: `Instance \`${id}\` is online again after ${formatDuration(now() - since)}.`, level: 'good' };
+        }
+        if (action === 'resolve') {
+          return { app: name, title: 'Process Status Cleared', message: `Instance \`${id}\` is now \`${status}\`, which IGNORE_STATUSES excludes from alerts.`, level: 'good' };
+        }
+        return { app: name, title: action === 'repeat' ? 'Process Still Down' : 'Process Status Alert', message: `Instance \`${id}\` has status \`${status}\`${ongoing(action, since)}.`, level: 'danger' };
+      });
 
-      if (!online) continue;
+      if (!isOnline) continue;
       // Null means this check could not read usage. Leave the alert and the
       // consecutive-sample count alone; 0 would look like the process went idle.
       if (cpu !== null) {
@@ -429,6 +504,21 @@ function formatUsage(value, unit) {
 
 function instanceKey(proc) {
   return `${proc.name}#${proc.pm_id}`;
+}
+
+function online(instances) {
+  return instances.filter((p) => p.status === 'online');
+}
+
+function describeStatuses(instances) {
+  return [...new Set(instances.map((p) => p.status))].join(', ');
+}
+
+function describeOnline(instances) {
+  const up = online(instances).length;
+  if (up === instances.length) return `all ${instances.length} instance(s) are online`;
+  const others = instances.filter((p) => p.status !== 'online');
+  return `${up} of ${instances.length} instance(s) are online, the others are ${describeStatuses(others)} (ignored)`;
 }
 
 function describeInstances(instances) {

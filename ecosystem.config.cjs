@@ -1,14 +1,16 @@
-// ecosystem.config.cjs
+// PM2 process file. Settings live in .env next to this file; see .env.example.
+// Avoid setting variables in an `env` block here: values set by PM2 take
+// precedence over .env, which makes .env edits silently ineffective.
 module.exports = {
   apps: [{
     name: 'pm2-monitor',
     script: './pm2-monitor.js',
+    cwd: __dirname,
     watch: false,
     time: true,
-    env: {
-      PORT: 3031,
-      HOST: '127.0.0.1',
-      WEB_ENABLED: 'true'
-    },
-  }]
+    autorestart: true,
+    max_restarts: 10,
+    restart_delay: 5000,
+    kill_timeout: 5000,
+  }],
 };

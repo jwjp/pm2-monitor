@@ -1,7 +1,7 @@
 {
   "name": "pm2-monitor",
-  "version": "1.0.0",
-  "description": "A script to monitor PM2 processes and send alerts to Slack.",
+  "version": "2.0.0",
+  "description": "Monitors PM2 processes and sends Slack alerts for restarts, status problems and high resource usage.",
   "main": "pm2-monitor.js",
   "type": "module",
   "scripts": {
@@ -9,7 +9,10 @@
     "stop": "pm2 stop pm2-monitor",
     "restart": "pm2 restart pm2-monitor",
     "logs": "pm2 logs pm2-monitor",
-    "check": "node --check pm2-monitor.js",
+    "once": "node pm2-monitor.js --once",
+    "dry-run": "node pm2-monitor.js --once --dry-run",
+    "test": "node --test",
+    "check": "node --check pm2-monitor.js && node --test",
     "audit": "npm audit"
   },
   "author": "",

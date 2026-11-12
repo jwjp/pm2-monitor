@@ -230,7 +230,7 @@ export function createMonitor({
     const sent = await notify({
       app,
       title,
-      message: `'${app}' is stable: all ${instances.length} instance(s) are online.\n(CPU avg: ${average(instances.map((p) => p.cpu))}%, Memory total: ${sum(instances.map((p) => p.memory))}MB)`,
+      message: `'${app}' is stable: all ${instances.length} instance(s) are online.\n(${usageSummary(instances)})`,
       level: 'good',
     });
     // An undelivered recovery keeps the incident open; closeRecoveredIncidents retries it.
@@ -264,7 +264,7 @@ export function createMonitor({
       if (watches.has(proc.name)) continue;
 
       const { name, pm_id: id, status, cpu, memory } = proc;
-      logger.log(`[Check] ${name}(${id}): ${status}, CPU ${cpu}%, Memory ${memory}MB`);
+      logger.log(`[Check] ${name}(${id}): ${status}, CPU ${formatUsage(cpu, '%')}, Memory ${formatUsage(memory, 'MB')}`);
 
       const online = status === 'online';
       await handleCondition(`${key}::status`, !online, status, (action, since) => (action === 'resolve'
@@ -272,12 +272,18 @@ export function createMonitor({
         : { app: name, title: action === 'repeat' ? 'Process Still Down' : 'Process Status Alert', message: `Instance \`${id}\` has status \`${status}\`${ongoing(action, since)}.`, level: 'danger' }));
 
       if (!online) continue;
-      await checkResource(proc, `${key}::cpu`, cpu > config.thresholds.cpu, {
-        label: 'CPU', value: `${cpu}%`, threshold: `${config.thresholds.cpu}%`,
-      });
-      await checkResource(proc, `${key}::memory`, memory > config.thresholds.memoryMb, {
-        label: 'Memory', value: `${memory}MB`, threshold: `${config.thresholds.memoryMb}MB`,
-      });
+      // Null means this check could not read usage. Leave the alert and the
+      // consecutive-sample count alone; 0 would look like the process went idle.
+      if (cpu !== null) {
+        await checkResource(proc, `${key}::cpu`, cpu > config.thresholds.cpu, {
+          label: 'CPU', value: `${cpu}%`, threshold: `${config.thresholds.cpu}%`,
+        });
+      }
+      if (memory !== null) {
+        await checkResource(proc, `${key}::memory`, memory > config.thresholds.memoryMb, {
+          label: 'Memory', value: `${memory}MB`, threshold: `${config.thresholds.memoryMb}MB`,
+        });
+      }
     }
 
     const isLive = (conditionKey) => {
@@ -330,6 +336,10 @@ export function createMonitor({
   };
 }
 
+function formatUsage(value, unit) {
+  return value === null ? 'unknown' : `${value}${unit}`;
+}
+
 function instanceKey(proc) {
   return `${proc.name}#${proc.pm_id}`;
 }
@@ -347,6 +357,21 @@ export function formatDuration(ms) {
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+// Unknown (null) samples are left out instead of counted as 0, and their number
+// is shown, so a partly unreadable app does not look idle or small.
+function usageSummary(instances) {
+  const part = (label, values, total, unit) => {
+    const known = values.filter((value) => value !== null);
+    if (known.length === 0) return `${label}: unknown`;
+    const missing = values.length - known.length;
+    return `${label}: ${total(known)}${unit}${missing ? ` (${missing} unknown)` : ''}`;
+  };
+  return [
+    part('CPU avg', instances.map((p) => p.cpu), average, '%'),
+    part('Memory total', instances.map((p) => p.memory), sum, 'MB'),
+  ].join(', ');
 }
 
 function sum(values) {

@@ -79,6 +79,10 @@ async function main() {
     shuttingDown = true;
     console.log(`[Info] Received ${signal}. Shutting down.`);
     await task.stop();
+    // Save first. monitor.stop() waits for restart watches, and a watch blocked
+    // in `pm2 jlist` can outlast PM2's kill_timeout. History is not rewritten
+    // on every check, so this is the copy that has to land.
+    await history?.flush({ force: true });
     await monitor.stop();
     // Idle keep-alive connections would otherwise hold close() open until PM2 kills the process.
     await new Promise((resolve) => {
@@ -86,7 +90,6 @@ async function main() {
       server.close(resolve);
       server.closeAllConnections?.();
     });
-    // History is saved only every STATUS_SAVE_INTERVAL_MS, so save the rest now.
     await history?.flush({ force: true });
     process.exit(0);
   };

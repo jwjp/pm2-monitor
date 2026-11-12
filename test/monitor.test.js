@@ -23,6 +23,30 @@ test('a restart is reported and confirmed once the app is stable', async () => {
   assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Successful']);
   assert.match(t.sent[0].message, /Detected 3 restart\(s\) of 'api' \(instance 0, 1\)/);
   assert.match(t.sent[0].message, /since the last check/);
+  assert.match(t.sent[1].message, /\(CPU avg: 1%, Memory total: 100MB\)/);
+});
+
+test('unknown usage is left out of the recovery message, not counted as 0', async () => {
+  const t = setup({ processes: [proc('api', 0), proc('api', 1)] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [
+    proc('api', 0, { restarts: 1, cpu: null, memory: null }),
+    proc('api', 1, { restarts: 1, cpu: 40, memory: 100 }),
+  ];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+  assert.match(t.sent[1].message, /\(CPU avg: 40% \(1 unknown\), Memory total: 100MB \(1 unknown\)\)/);
+
+  t.state.processes = [
+    proc('api', 0, { restarts: 2, cpu: null, memory: null }),
+    proc('api', 1, { restarts: 2, cpu: null, memory: null }),
+  ];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+  assert.match(t.sent.at(-1).message, /\(CPU avg: unknown, Memory total: unknown\)/);
 });
 
 test('a restart that keeps crashing is reported as failed', async () => {
@@ -113,6 +137,31 @@ test('high CPU must last for RESOURCE_ALERT_SAMPLES checks before alerting', asy
   t.state.processes = [proc('api', 0, { cpu: 10 })];
   await t.monitor.runCycle();
   assert.deepEqual(t.titles(), ['High CPU Usage', 'CPU Usage Back to Normal']);
+});
+
+test('an unknown resource sample does not clear an open alert', async () => {
+  const t = setup({ processes: [proc('api', 0, { cpu: 95, memory: 800 })] });
+  await t.monitor.runCycle();
+  await t.monitor.runCycle();
+  assert.deepEqual(t.titles(), ['High CPU Usage', 'High Memory Usage']);
+
+  t.state.processes = [proc('api', 0, { cpu: null, memory: null })];
+  await t.monitor.runCycle();
+  assert.deepEqual(t.titles(), ['High CPU Usage', 'High Memory Usage']);
+
+  t.state.processes = [proc('api', 0, { cpu: 10, memory: 50 })];
+  await t.monitor.runCycle();
+  assert.deepEqual(t.titles(), ['High CPU Usage', 'High Memory Usage', 'CPU Usage Back to Normal', 'Memory Usage Back to Normal']);
+});
+
+test('an unknown CPU sample does not reset the breach streak', async () => {
+  const t = setup({ processes: [proc('api', 0, { cpu: 95 })] });
+  await t.monitor.runCycle();
+  t.state.processes = [proc('api', 0, { cpu: null })];
+  await t.monitor.runCycle();
+  t.state.processes = [proc('api', 0, { cpu: 95 })];
+  await t.monitor.runCycle();
+  assert.deepEqual(t.titles(), ['High CPU Usage']);
 });
 
 test('a short CPU spike does not produce a recovery message', async () => {

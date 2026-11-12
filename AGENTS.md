@@ -79,7 +79,13 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
    app is stable ("Restart Successful" / "App Recovered") or the reminder
    interval passes. The recovery message is sent if any alert of the incident
    was delivered, and it resolves the instances' status alerts, so no separate
-   "Process Back Online" follows.
+   "Process Back Online" follows. The incident stays open for
+   `incidentStableMs` after the app is first seen healthy (`stableSince`). A
+   restart in that time is a relapse: it is reported once ("restarted again …")
+   even inside the reminder interval, marks the incident `flapping`, and
+   "App Recovered" is then sent only after the app stays up for the full
+   period. Without this, an app that crashes slower than the watch polls sends
+   "Restart Detected" + "Restart Successful" at every check.
 6. **Never throw out of a cycle.** `notifier.send` returns `false` instead of
    throwing, `history.flush` logs instead of throwing, and `runCycle` turns PM2
    failures into the `monitor::pm2` condition. `runCycle` skips itself if the

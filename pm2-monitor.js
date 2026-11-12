@@ -11,6 +11,7 @@
  *   node pm2-monitor.js --dry-run    log alerts instead of sending them to Slack
  */
 
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import cron from 'node-cron';
@@ -23,7 +24,9 @@ import { createMonitor } from './src/monitor.js';
 import { createStatusServer } from './src/server.js';
 
 // Load .env next to this script, so it works whatever the working directory is.
-dotenv.config({ path: fileURLToPath(new URL('./.env', import.meta.url)), quiet: true });
+// Relative paths in settings (STATUS_LOG_FILE) are resolved the same way.
+const projectDir = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.join(projectDir, '.env'), quiet: true });
 
 async function main() {
   const { config, errors, warnings } = loadConfig(process.env, process.argv.slice(2));
@@ -39,7 +42,7 @@ async function main() {
   // A one-off run serves no status endpoint, and writing the shared history
   // file would race with a monitor already running under PM2.
   const history = config.web.enabled && !config.runOnce
-    ? createHistory({ file: config.web.historyFile, maxEntries: config.web.maxHistory, saveIntervalMs: config.web.saveIntervalMs })
+    ? createHistory({ file: path.resolve(projectDir, config.web.historyFile), maxEntries: config.web.maxHistory, saveIntervalMs: config.web.saveIntervalMs })
     : null;
   await history?.load();
 

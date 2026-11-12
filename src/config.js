@@ -91,6 +91,9 @@ export function loadConfig(env = process.env, argv = []) {
     },
     resourceAlertSamples: number('RESOURCE_ALERT_SAMPLES', 2, { min: 1, integer: true }),
     alertRepeatMs: alertRepeatMs(),
+    // How long an app must stay up after a restart before its incident closes.
+    // A restart within this period is a relapse of the same incident.
+    incidentStableMs: number('INCIDENT_STABLE_MS', 10 * MINUTE_MS, { min: 0 }),
     recheck: {
       intervalMs: number('RECHECK_INTERVAL_MS', 5 * 1000, { min: 1000 }),
       maxAttempts: number('RECHECK_MAX_ATTEMPTS', 12, { min: 1, integer: true }),

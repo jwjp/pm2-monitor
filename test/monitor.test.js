@@ -27,7 +27,7 @@ test('a restart is reported and confirmed once the app is stable', async () => {
 });
 
 test('unknown usage is left out of the recovery message, not counted as 0', async () => {
-  const t = setup({ processes: [proc('api', 0), proc('api', 1)] });
+  const t = setup({ env: { INCIDENT_STABLE_MS: '0' }, processes: [proc('api', 0), proc('api', 1)] });
   await t.monitor.runCycle();
 
   t.state.processes = [
@@ -97,6 +97,81 @@ test('a crash loop does not repeat restart alerts within the reminder interval',
   t.advance(MINUTE);
   await t.monitor.runCycle();
   assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Failed', 'Process Status Alert']);
+});
+
+test('an app that restarts again after it was reported stable is one incident', async () => {
+  const t = setup({ processes: [proc('api', 0)] });
+  await t.monitor.runCycle();
+
+  // Restarts about once a minute, but is online at every poll of the watch.
+  for (let i = 1; i <= 6; i += 1) {
+    t.state.processes = [proc('api', 0, { restarts: i })];
+    t.advance(MINUTE);
+    await t.monitor.runCycle();
+    await t.monitor.idle();
+  }
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Successful', 'Process Restart Detected']);
+  assert.match(t.sent[2].message, /restarted again 1m after it was reported stable/);
+  assert.match(t.sent[2].message, /2 restart\(s\) since this incident started/);
+  assert.match(t.sent[2].message, /until it stays up for 10m/);
+
+  // Stable from the last watch poll on: recovered once 10 minutes have passed, not before.
+  for (let i = 0; i < 9; i += 1) {
+    t.advance(MINUTE);
+    await t.monitor.runCycle();
+  }
+  assert.equal(t.titles().length, 3);
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  assert.equal(t.titles().at(-1), 'App Recovered');
+  assert.match(t.sent.at(-1).message, /stayed up for 10m after 6 restart\(s\)/);
+});
+
+test('a restart after the stable period is a new incident', async () => {
+  const t = setup({ env: { INCIDENT_STABLE_MS: String(5 * MINUTE) }, processes: [proc('api', 0)] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1 })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+  for (let i = 0; i < 6; i += 1) {
+    t.advance(MINUTE);
+    await t.monitor.runCycle();
+  }
+
+  t.state.processes = [proc('api', 0, { restarts: 2 })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Successful', 'Process Restart Detected', 'Restart Successful']);
+  assert.doesNotMatch(t.sent[2].message, /again|since this incident started/);
+});
+
+test('an undelivered relapse alert is retried at the next restart', async () => {
+  const t = setup({ processes: [proc('api', 0)] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1 })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  t.state.deliver = false;
+  t.state.processes = [proc('api', 0, { restarts: 2 })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  t.state.deliver = true;
+  t.state.processes = [proc('api', 0, { restarts: 3 })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Successful', 'Process Restart Detected', 'Process Restart Detected']);
+  assert.match(t.sent[3].message, /restarted again/);
 });
 
 test('a lasting problem is reported once, reminded, and resolved', async () => {
@@ -208,6 +283,17 @@ test('overlapping checks are skipped', async () => {
   const [a, b] = await Promise.all([t.monitor.runCycle(), t.monitor.runCycle()]);
   assert.equal(a.ok, true);
   assert.equal(b.skipped, true);
+});
+
+test('stop lets a running check finish and skips later ones', async () => {
+  const t = setup({ processes: [proc('api', 0, { status: 'errored' })] });
+  let finished = false;
+  t.monitor.runCycle().then(() => { finished = true; });
+  await t.monitor.stop();
+  assert.equal(finished, true);
+  assert.deepEqual(t.titles(), ['Process Status Alert']);
+
+  assert.equal((await t.monitor.runCycle()).skipped, true);
 });
 
 test('alerts for removed instances are dropped silently', async () => {

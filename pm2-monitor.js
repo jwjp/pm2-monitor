@@ -98,7 +98,7 @@ async function main() {
     await new Promise((resolve) => {
       if (!server) return resolve();
       server.close(resolve);
-      server.closeAllConnections?.();
+      server.closeAllConnections();
     });
     await history?.flush({ force: true });
     process.exit(0);

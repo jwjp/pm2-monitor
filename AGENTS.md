@@ -6,7 +6,7 @@ the code works and how to change it safely.
 
 ## What this is
 
-A Node.js (ESM, Node >= 18) service that runs under PM2, polls `pm2 jlist` on a
+A Node.js (ESM, Node >= 22) service that runs under PM2, polls `pm2 jlist` on a
 cron schedule, and sends Slack alerts for restarts, non-`online` status, and
 high CPU/memory. It sends a follow-up when each problem clears, reports apps
 that leave the process list, can attach the end of an app's error log to

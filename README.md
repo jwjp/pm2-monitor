@@ -28,7 +28,7 @@ attention, and sends a follow-up when the problem clears.
 
 ## Requirements
 
-- Node.js 18 or later
+- Node.js 22 or later
 - PM2 installed and available on `PATH` (or set `PM2_BIN`)
 - A Slack Incoming Webhook URL (not needed for dry runs)
 
@@ -163,6 +163,7 @@ curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit
 
 ## Upgrading from 2.x
 
+- **Node.js 22 or later is required.** Node 18 and 20 are end-of-life.
 - **"App Removed" is new.** Deleting an app from PM2 (or restarting PM2 without
   it) now sends one alert; it used to be silent.
 - Everything else is opt-in: `IGNORE_STATUSES`, `RESTART_LOG_LINES` and

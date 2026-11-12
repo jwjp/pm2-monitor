@@ -22,37 +22,46 @@ const SCRIPT = [
  */
 export function createWindowsUsageReader({ run = runPowerShell, now = () => Date.now() } = {}) {
   const previous = new Map(); // pid -> { cpuMs, at }
+  // A check and a restart watch can read at the same time. Overlapping reads
+  // could store an older CPU time after a newer one, which looks like a reused pid.
+  let queue = Promise.resolve();
 
   return {
     /** Returns Map(pid -> { cpu: number | null, memoryBytes: number }). */
-    async read(pids) {
-      const wanted = [...new Set(pids)].filter((pid) => Number.isInteger(pid) && pid > 0);
-      const usage = new Map();
-      if (wanted.length === 0) return usage;
-
-      const stdout = await run(wanted);
-      const at = now();
-      for (const line of String(stdout).split(/\r?\n/)) {
-        const match = /^(\d+) (\d+) (\d+)$/.exec(line.trim());
-        if (!match) continue;
-        const [pid, cpuMs, memoryBytes] = match.slice(1).map(Number);
-
-        const last = previous.get(pid);
-        const elapsed = last ? at - last.at : 0;
-        // A lower CPU time means the pid now belongs to another process.
-        const cpu = last && elapsed > 0 && cpuMs >= last.cpuMs
-          ? Number((((cpuMs - last.cpuMs) / elapsed) * 100).toFixed(1))
-          : null;
-        previous.set(pid, { cpuMs, at });
-        usage.set(pid, { cpu, memoryBytes });
-      }
-
-      for (const pid of previous.keys()) {
-        if (!usage.has(pid)) previous.delete(pid);
-      }
-      return usage;
+    read(pids) {
+      const result = queue.then(() => readNow(pids));
+      queue = result.catch(() => {});
+      return result;
     },
   };
+
+  async function readNow(pids) {
+    const wanted = [...new Set(pids)].filter((pid) => Number.isInteger(pid) && pid > 0);
+    const usage = new Map();
+    if (wanted.length === 0) return usage;
+
+    const stdout = await run(wanted);
+    const at = now();
+    for (const line of String(stdout).split(/\r?\n/)) {
+      const match = /^(\d+) (\d+) (\d+)$/.exec(line.trim());
+      if (!match) continue;
+      const [pid, cpuMs, memoryBytes] = match.slice(1).map(Number);
+
+      const last = previous.get(pid);
+      const elapsed = last ? at - last.at : 0;
+      // A lower CPU time means the pid now belongs to another process.
+      const cpu = last && elapsed > 0 && cpuMs >= last.cpuMs
+        ? Number((((cpuMs - last.cpuMs) / elapsed) * 100).toFixed(1))
+        : null;
+      previous.set(pid, { cpuMs, at });
+      usage.set(pid, { cpu, memoryBytes });
+    }
+
+    for (const pid of previous.keys()) {
+      if (!usage.has(pid)) previous.delete(pid);
+    }
+    return usage;
+  }
 }
 
 async function runPowerShell(pids) {

@@ -56,6 +56,15 @@ export class AlertTracker {
     if (entry) entry.lastSentAt = now;
   }
 
+  /**
+   * Records an active condition as already notified, because another alert
+   * delivered at `now` covered it. Leaves a condition that is already tracked alone.
+   */
+  adopt(key, signature, now) {
+    if (this.active.has(key)) return;
+    this.active.set(key, { since: now, lastSentAt: now, signature });
+  }
+
   /** Forgets a condition once its resolve has been delivered. */
   markResolved(key) {
     this.active.delete(key);

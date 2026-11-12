@@ -43,6 +43,38 @@ test('usage: a reused pid with less CPU time starts over', async () => {
   assert.equal((await reader.read([10])).get(10).cpu, null);
 });
 
+test('usage: overlapping reads run one after another', async () => {
+  let clock = 0;
+  let cpuMs = 0;
+  let active = 0;
+  const reader = createWindowsUsageReader({
+    now: () => clock,
+    run: async () => {
+      active += 1;
+      assert.equal(active, 1);
+      cpuMs += 500;
+      const line = `10 ${cpuMs} 1048576`;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      clock += 1000;
+      active -= 1;
+      return line;
+    },
+  });
+  const [, second, third] = await Promise.all([reader.read([10]), reader.read([10]), reader.read([10])]);
+  assert.equal(second.get(10).cpu, 50);
+  assert.equal(third.get(10).cpu, 50);
+});
+
+test('usage: a failed read does not block later ones', async () => {
+  let fail = true;
+  const reader = createWindowsUsageReader({
+    run: async () => { if (fail) throw new Error('boom'); return '10 1 1048576'; },
+  });
+  await assert.rejects(reader.read([10]), /boom/);
+  fail = false;
+  assert.equal((await reader.read([10])).get(10).memoryBytes, 1048576);
+});
+
 test('usage: no pids means no PowerShell call', async () => {
   const reader = createWindowsUsageReader({ run: async () => { throw new Error('should not run'); } });
   assert.equal((await reader.read([])).size, 0);

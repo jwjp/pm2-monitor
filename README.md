@@ -82,8 +82,9 @@ is reported at the first check of the next morning (the alert says since when).
 | `DRY_RUN` | `false` | Log alerts instead of sending them (same as `--dry-run`). |
 | `PM2_BIN` | `pm2` (`pm2.cmd` on Windows) | PM2 executable name or path. |
 | `CRON_SCHEDULE` | `*/1 8-19 * * 1-5` | Check schedule in node-cron syntax. |
-| `CRON_TIMEZONE` | `America/New_York` | IANA time zone for the schedule and alert times. |
+| `CRON_TIMEZONE` | `Asia/Seoul` | IANA time zone for the schedule and alert times. |
 | `EXCLUDED_APPS` | `pm2-monitor,pm2-logrotate` | Comma-separated PM2 app names to ignore. |
+| `WINDOWS_USAGE_FALLBACK` | `true` | Windows only: when PM2 reports 0 memory for an online process, read CPU/memory from Windows (`Get-Process`) instead. |
 | `CPU_THRESHOLD` | `80` | CPU percentage alert threshold. |
 | `MEMORY_THRESHOLD_MB` | `450` | Memory alert threshold in MB. |
 | `RESOURCE_ALERT_SAMPLES` | `2` | Consecutive checks above a threshold before alerting. |
@@ -97,6 +98,7 @@ is reported at the first check of the next morning (the alert says since when).
 | `PORT` | `3031` | Port for the status endpoint. |
 | `STATUS_LOG_FILE` | `./status-history.json` | File the status history is saved to. |
 | `MAX_HISTORY` | `1440` | Number of snapshots to keep. |
+| `STATUS_SAVE_INTERVAL_MS` | `300000` (5 min) | How often the history file is rewritten; `0` saves after every check. Unsaved snapshots are written on shutdown. |
 | `STATUS_TOKEN` | empty | Bearer token for `/status`. Required when `HOST` is not a loopback address. |
 
 ## Status endpoint
@@ -132,6 +134,9 @@ curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit
   send a reminder at every check, so it is ignored with a startup warning and
   the 30-minute default is used. Remove it or set `ALERT_REPEAT_MS` instead;
   `ALERT_REPEAT_MS` is always taken as given.
+- **The default `CRON_TIMEZONE` is now `Asia/Seoul`** (was `America/New_York`).
+  The default schedule therefore runs 08:00–19:59 Korean time on weekdays, and
+  alert times are shown in KST. Set `CRON_TIMEZONE` to keep another zone.
 - **CPU and memory alerts wait for 2 consecutive checks** by default. Set
   `RESOURCE_ALERT_SAMPLES=1` for the old behavior.
 - **`.env` is read from the project directory**, not the working directory, and
@@ -143,10 +148,12 @@ curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit
 
 ## Known limitations
 
-- **CPU and memory read as 0 on some Windows hosts.** PM2 reads process usage
-  through `wmic`, which recent Windows 11 builds no longer include, so
-  `pm2 jlist` itself reports `0`. Resource alerts cannot fire there. Linux and
-  macOS hosts are not affected.
+- **PM2 reports CPU and memory as 0 on recent Windows 11.** PM2 reads process
+  usage through `wmic`, which those builds no longer include. The monitor then
+  reads usage from Windows itself (`WINDOWS_USAGE_FALLBACK`, on by default),
+  which starts one PowerShell per check. CPU is measured between two readings,
+  so the first check after a process starts shows 0% CPU. `/status` history
+  contains the corrected values; `pm2 ls` still shows 0.
 - **A crash loop may never become `errored`.** PM2 only counts a restart against
   `max_restarts` when the process lived shorter than `min_uptime` (1s by
   default). An app that crashes after a few seconds keeps restarting while
@@ -173,6 +180,7 @@ against a real but isolated PM2 daemon.
 pm2-monitor.js     entry point: loads .env, wires everything, schedules checks
 src/config.js      reads and validates settings
 src/pm2.js         runs `pm2 jlist` and normalizes its output
+src/usage.js       CPU/memory from Windows when PM2 cannot read them
 src/monitor.js     restart detection, follow-up checks, status/resource alerts
 src/alerts.js      alert state (start, reminder, resolve)
 src/notifier.js    Slack payloads and delivery (or dry-run logging)

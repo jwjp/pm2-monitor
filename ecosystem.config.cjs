@@ -12,5 +12,8 @@ module.exports = {
     max_restarts: 10,
     restart_delay: 5000,
     kill_timeout: 5000,
+    // Stop via a 'shutdown' message rather than SIGINT, which Windows cannot
+    // deliver, so the monitor can save its history before exiting.
+    shutdown_with_message: true,
   }],
 };

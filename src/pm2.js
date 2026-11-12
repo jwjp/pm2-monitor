@@ -9,10 +9,45 @@ const EXEC_OPTIONS = {
   timeout: 30 * 1000,
 };
 
-/** Runs `pm2 jlist` and returns the normalized, filtered process list. */
-export async function listPm2Processes({ pm2Bin, excludedApps }) {
+/**
+ * Runs `pm2 jlist` and returns the normalized, filtered process list. With a
+ * `usageReader` (see src/usage.js), CPU and memory that PM2 could not read are
+ * filled in from the operating system.
+ */
+export async function listPm2Processes({ pm2Bin, excludedApps }, { usageReader = null, logger = console } = {}) {
   const stdout = await runJlist(pm2Bin);
-  return parseJlist(stdout, excludedApps);
+  const processes = parseJlist(stdout, excludedApps);
+  if (usageReader) await fillMissingUsage(processes, usageReader, logger);
+  return processes;
+}
+
+let usageWarned = false;
+
+/**
+ * An online process always uses some memory, so 0 means PM2 could not read
+ * usage (no `wmic` on recent Windows 11). Only those processes are looked up.
+ */
+export async function fillMissingUsage(processes, usageReader, logger = console) {
+  const missing = processes.filter((p) => p.status === 'online' && p.pid > 0 && p.memory === 0);
+  if (missing.length === 0) return;
+
+  let usage;
+  try {
+    usage = await usageReader.read(missing.map((p) => p.pid));
+    usageWarned = false;
+  } catch (error) {
+    // Keep PM2's values; warn once per failure streak instead of every check.
+    if (!usageWarned) logger.warn(`[Warn] Could not read CPU/memory from Windows: ${error.message}`);
+    usageWarned = true;
+    return;
+  }
+
+  for (const proc of missing) {
+    const found = usage.get(proc.pid);
+    if (!found) continue;
+    proc.memory = roundMb(found.memoryBytes);
+    proc.cpu = found.cpu ?? 0;
+  }
 }
 
 async function runJlist(pm2Bin) {

@@ -22,6 +22,8 @@ import { createNotifier } from './src/notifier.js';
 import { createHistory } from './src/history.js';
 import { createMonitor } from './src/monitor.js';
 import { createStatusServer } from './src/server.js';
+import { createHeartbeat } from './src/heartbeat.js';
+import { readLogTail } from './src/logs.js';
 
 // Load .env next to this script, so it works whatever the working directory is.
 // Relative paths in settings (STATUS_LOG_FILE) are resolved the same way.
@@ -58,6 +60,11 @@ async function main() {
       timezone: config.timezone,
     }),
     history,
+    // A one-off or dry run must not tell the heartbeat service that the scheduled monitor is alive.
+    heartbeat: config.heartbeat.url && !config.dryRun && !config.runOnce
+      ? createHeartbeat({ url: config.heartbeat.url, timeoutMs: config.heartbeat.timeoutMs })
+      : null,
+    readLog: readLogTail,
   });
 
   if (config.runOnce) {
@@ -91,7 +98,7 @@ async function main() {
     await new Promise((resolve) => {
       if (!server) return resolve();
       server.close(resolve);
-      server.closeAllConnections?.();
+      server.closeAllConnections();
     });
     await history?.flush({ force: true });
     process.exit(0);
@@ -130,6 +137,10 @@ function printSummary(config) {
   console.log(`- Thresholds: CPU > ${config.thresholds.cpu}%, Memory > ${config.thresholds.memoryMb}MB for ${config.resourceAlertSamples} check(s)`);
   console.log(`- Alert reminders: ${config.alertRepeatMs > 0 ? `every ${Math.round(config.alertRepeatMs / 60000)} min while a problem lasts` : 'off'}`);
   console.log(`- Excluded apps: ${config.excludedApps.join(', ') || 'none'}`);
+  console.log(`- Ignored statuses: ${config.ignoreStatuses.join(', ') || 'none'}`);
+  console.log(`- Error log in restart alerts: ${config.restartLogLines > 0 ? `last ${config.restartLogLines} line(s)` : 'off'}`);
+  const heartbeatOn = config.heartbeat.url && !config.dryRun && !config.runOnce;
+  console.log(`- Heartbeat: ${heartbeatOn ? new URL(config.heartbeat.url).origin : `off${config.heartbeat.url ? ' (dry or one-off run)' : ''}`}`);
   console.log(`- PM2 binary: ${config.pm2Bin}`);
   if (process.platform === 'win32') {
     console.log(`- CPU/memory fallback: ${config.windowsUsageFallback ? 'on (read from Windows when PM2 reports 0)' : 'off'}`);

@@ -145,6 +145,7 @@ export function parseJlist(stdout, excludedApps = []) {
       cpu: Number(monit.cpu) || 0,
       memory: roundMb(Number(monit.memory) || 0),
       uptimeStartedAt: Number(pm2_env.pm_uptime) || null,
+      errLogPath: typeof pm2_env.pm_err_log_path === 'string' ? pm2_env.pm_err_log_path : null,
     }));
 }
 

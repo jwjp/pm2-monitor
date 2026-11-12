@@ -12,7 +12,8 @@ export function setup({ env = {}, processes = [], deliver = true } = {}) {
   const { config, errors } = loadConfig({ DRY_RUN: 'true', ...env });
   if (errors.length) throw new Error(errors.join('\n'));
 
-  const state = { processes, fail: null, deliver, clock: Date.UTC(2026, 0, 5, 14, 0, 0) };
+  // `logs` maps an error log path to its lines; `pings` counts heartbeats.
+  const state = { processes, fail: null, deliver, clock: Date.UTC(2026, 0, 5, 14, 0, 0), logs: {}, pings: 0 };
   const sent = [];
   // Records every attempted alert; `state.deliver` decides whether delivery succeeds.
   const notifier = {
@@ -26,6 +27,16 @@ export function setup({ env = {}, processes = [], deliver = true } = {}) {
     config,
     logger: silentLogger,
     notifier,
+    heartbeat: {
+      async ping() {
+        state.pings += 1;
+        return true;
+      },
+    },
+    async readLog(file, lines) {
+      if (!state.logs[file]) throw new Error(`ENOENT: no such file '${file}'`);
+      return state.logs[file].slice(-lines);
+    },
     now: () => state.clock,
     sleep: async (ms) => {
       state.clock += ms;

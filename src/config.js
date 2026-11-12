@@ -6,6 +6,8 @@ const MINUTE_MS = 60 * 1000;
 const LEGACY_MIN_REPEAT_MS = 5 * MINUTE_MS;
 
 export const LOOPBACK_HOSTS = ['127.0.0.1', '::1', 'localhost'];
+// PM2 statuses other than `online` that IGNORE_STATUSES may name.
+export const IGNORABLE_STATUSES = ['stopped', 'stopping', 'launching', 'errored', 'one-launch-status', 'waiting restart'];
 
 /**
  * Builds the runtime configuration from environment variables and CLI flags.
@@ -70,6 +72,26 @@ export function loadConfig(env = process.env, argv = []) {
     return legacy;
   };
 
+  const ignoreStatuses = () => {
+    const values = list('IGNORE_STATUSES', []);
+    const unknown = values.filter((value) => !IGNORABLE_STATUSES.includes(value));
+    if (unknown.length > 0) {
+      errors.push(`IGNORE_STATUSES may only contain ${IGNORABLE_STATUSES.join(', ')} (got "${unknown.join(', ')}").`);
+      return [];
+    }
+    return values;
+  };
+
+  const httpUrl = (name) => {
+    const raw = read(name);
+    if (raw === undefined) return undefined;
+    if (!isHttpUrl(raw)) {
+      errors.push(`${name} must be an http:// or https:// URL.`);
+      return undefined;
+    }
+    return raw;
+  };
+
   const dryRun = flags.has('--dry-run') || boolean('DRY_RUN', false);
 
   const config = {
@@ -77,6 +99,8 @@ export function loadConfig(env = process.env, argv = []) {
     schedule: string('CRON_SCHEDULE', '*/1 8-19 * * 1-5'),
     timezone: string('CRON_TIMEZONE', 'Asia/Seoul'),
     excludedApps: list('EXCLUDED_APPS', ['pm2-monitor', 'pm2-logrotate']),
+    // Statuses that are not reported, e.g. `stopped` for apps stopped on purpose.
+    ignoreStatuses: ignoreStatuses(),
     // Only used on Windows: read CPU/memory from the OS when PM2 reports 0.
     windowsUsageFallback: boolean('WINDOWS_USAGE_FALLBACK', true),
     runOnce: flags.has('--once') || boolean('RUN_ONCE', false),
@@ -94,6 +118,13 @@ export function loadConfig(env = process.env, argv = []) {
     // How long an app must stay up after a restart before its incident closes.
     // A restart within this period is a relapse of the same incident.
     incidentStableMs: number('INCIDENT_STABLE_MS', 10 * MINUTE_MS, { min: 0 }),
+    // Lines of the app's error log attached to restart alerts; 0 = off, as logs may hold secrets.
+    restartLogLines: number('RESTART_LOG_LINES', 0, { min: 0, max: 50, integer: true }),
+    // Pinged after every successful check, so an external service notices when the monitor stops.
+    heartbeat: {
+      url: httpUrl('HEARTBEAT_URL'),
+      timeoutMs: number('HEARTBEAT_TIMEOUT_MS', 10 * 1000, { min: 1000 }),
+    },
     recheck: {
       intervalMs: number('RECHECK_INTERVAL_MS', 5 * 1000, { min: 1000 }),
       maxAttempts: number('RECHECK_MAX_ATTEMPTS', 12, { min: 1, integer: true }),
@@ -127,6 +158,15 @@ export function isValidSlackWebhookUrl(value) {
   try {
     const url = new URL(value);
     return url.protocol === 'https:' && url.hostname === 'hooks.slack.com' && url.pathname.startsWith('/services/');
+  } catch {
+    return false;
+  }
+}
+
+export function isHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' || url.protocol === 'http:';
   } catch {
     return false;
   }

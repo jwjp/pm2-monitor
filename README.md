@@ -118,6 +118,49 @@ set `STATUS_TOKEN`; otherwise `/status` answers 401.
 curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit=5
 ```
 
+## Upgrading from 1.x
+
+- **History timestamps** in `/status` and `status-history.json` are now ISO 8601
+  in UTC (`2026-11-12T02:31:00.017Z`) instead of a US-formatted local time.
+  Update dashboards that parse the old format.
+- **`THROTTLE_DURATION_MS` now means the reminder interval** (it is read as
+  `ALERT_REPEAT_MS`). Problems are alerted once when they start and once when
+  they clear, so an old value such as `30000` would send a reminder every 30
+  seconds. Remove it or set `ALERT_REPEAT_MS` instead.
+- **CPU and memory alerts wait for 2 consecutive checks** by default. Set
+  `RESOURCE_ALERT_SAMPLES=1` for the old behavior.
+- **`.env` is read from the project directory**, not the working directory, and
+  `ecosystem.config.cjs` no longer sets `PORT`, `HOST` or `WEB_ENABLED`.
+- **Invalid settings stop startup** instead of silently falling back to defaults.
+  Run `npm run dry-run` after upgrading to see any configuration errors.
+- `/healthz` now also returns `lastCycleAt`, `running` and `watchingRestarts`.
+
+## Known limitations
+
+- **CPU and memory read as 0 on some Windows hosts.** PM2 reads process usage
+  through `wmic`, which recent Windows 11 builds no longer include, so
+  `pm2 jlist` itself reports `0`. Resource alerts cannot fire there. Linux and
+  macOS hosts are not affected.
+- **A crash loop may never become `errored`.** PM2 only counts a restart against
+  `max_restarts` when the process lived shorter than `min_uptime` (1s by
+  default). An app that crashes after a few seconds keeps restarting while
+  showing `online`. The monitor reports this as one incident ("Restart
+  Detected" followed by "Restart Failed") and logs later restarts quietly
+  until the app is stable or the reminder interval passes.
+- **Checks only run on the schedule.** Restarts between checks are counted and
+  reported at the next check; the exact time of each restart is not known.
+
+## Development
+
+```bash
+npm install
+npm test            # unit and integration tests, no PM2 or Slack needed
+npm run dry-run     # one real check against the local PM2, alerts printed only
+```
+
+See [AGENTS.md](AGENTS.md) for the architecture, design rules and how to test
+against a real but isolated PM2 daemon.
+
 ## Project layout
 
 ```text

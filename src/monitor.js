@@ -242,6 +242,14 @@ export function createMonitor({
       incident.failureNotifiedAt = incident.notifiedAt;
       incident.failureSent = true;
     }
+    // "Restart Failed" already lists each instance's status. Record it as the
+    // status alert, so the next check does not send "Process Status Alert" for
+    // the same state; reminders and a later status change still go out.
+    if (sent) {
+      for (const p of instances) {
+        if (p.status !== 'online') alerts.adopt(`${instanceKey(p)}::status`, p.status, now());
+      }
+    }
   }
 
   /**

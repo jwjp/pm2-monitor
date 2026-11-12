@@ -85,7 +85,10 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
    even inside the reminder interval, marks the incident `flapping`, and
    "App Recovered" is then sent only after the app stays up for the full
    period. Without this, an app that crashes slower than the watch polls sends
-   "Restart Detected" + "Restart Successful" at every check.
+   "Restart Detected" + "Restart Successful" at every check. A delivered
+   "Restart Failed" also `adopt`s the status alerts of its non-online
+   instances as already sent, so the next check does not repeat the same
+   `errored` state as "Process Status Alert" (reminders still follow).
 6. **Never throw out of a cycle.** `notifier.send` returns `false` instead of
    throwing, `history.flush` logs instead of throwing, and `runCycle` turns PM2
    failures into the `monitor::pm2` condition. `runCycle` skips itself if the
@@ -117,7 +120,8 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
   stays `null`. A failed or missing reading sets CPU and memory to `null`.
   Resource checks skip a null sample: it does not start or clear an alert, and
   it does not reset the consecutive-sample count. Pids are passed through an
-  environment variable, never interpolated into the script.
+  environment variable, never interpolated into the script. Reads are
+  serialized, because a check and a restart watch can read at the same time.
 - **Windows cannot deliver SIGINT** to the monitor, so `ecosystem.config.cjs`
   sets `shutdown_with_message` and `pm2-monitor.js` also shuts down on the
   `'shutdown'` IPC message. Shutdown force-saves history before it waits for

@@ -93,10 +93,33 @@ test('a crash loop does not repeat restart alerts within the reminder interval',
   }
   assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Failed']);
 
-  // PM2 gave up restarting: the lasting errored state is now reported on its own.
+  // PM2 gave up restarting. "Restart Failed" already said `errored`, so the
+  // lasting state is not reported again until its reminder is due.
   t.advance(MINUTE);
   await t.monitor.runCycle();
-  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Failed', 'Process Status Alert']);
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Failed']);
+  t.advance(30 * MINUTE);
+  await t.monitor.runCycle();
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Failed', 'Process Still Down']);
+});
+
+test('a changed status after Restart Failed is still reported', async () => {
+  const t = setup({ processes: [proc('api', 0)] });
+  await t.monitor.runCycle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1, status: 'errored' })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  await t.monitor.idle();
+
+  t.state.processes = [proc('api', 0, { restarts: 1, status: 'stopped' })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+  t.state.processes = [proc('api', 0, { restarts: 1 })];
+  t.advance(MINUTE);
+  await t.monitor.runCycle();
+
+  assert.deepEqual(t.titles(), ['Process Restart Detected', 'Restart Failed', 'Process Status Alert', 'App Recovered']);
 });
 
 test('an app that restarts again after it was reported stable is one incident', async () => {

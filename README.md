@@ -65,7 +65,7 @@ The script also accepts `--once` and `--dry-run` directly:
 | Process Restart Detected | An instance's restart count went up since the last check. |
 | Restart Successful / Restart Failed | Result of the follow-up checks after a restart. |
 | App Recovered | An app whose restart check failed is healthy again, or an app that relapsed has stayed up for `INCIDENT_STABLE_MS`. |
-| Process Status Alert → Process Back Online | An instance is not `online` (a change such as `stopping` → `errored` is a new alert). |
+| Process Status Alert → Process Back Online | An instance is not `online` (a change such as `stopping` → `errored` is a new alert). Not sent for a status that "Restart Failed" already reported; its reminders still are. |
 | High CPU / Memory Usage → Back to Normal | Above the threshold for `RESOURCE_ALERT_SAMPLES` checks in a row. |
 | Monitoring Failed → Monitoring Recovered | `pm2 jlist` could not be run or parsed. |
 

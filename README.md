@@ -141,6 +141,10 @@ curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit
   `RESOURCE_ALERT_SAMPLES=1` for the old behavior.
 - **`.env` is read from the project directory**, not the working directory, and
   `ecosystem.config.cjs` no longer sets `PORT`, `HOST` or `WEB_ENABLED`.
+- **Re-create the PM2 process** so the updated `ecosystem.config.cjs` takes
+  effect: `pm2 delete pm2-monitor && npm start`, then `pm2 save` if you use
+  `pm2 startup`. `pm2 restart` keeps the old process options, including the
+  `env` block and without `shutdown_with_message`.
 - **Invalid settings stop startup** instead of silently falling back to defaults.
   Run `npm run dry-run` after upgrading to see any configuration errors.
 - `/healthz` now also returns `lastCycleAt` and `running`, plus

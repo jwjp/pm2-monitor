@@ -20,6 +20,7 @@ import { listPm2Processes } from './src/pm2.js';
 import { createWindowsUsageReader } from './src/usage.js';
 import { createNotifier } from './src/notifier.js';
 import { createHistory } from './src/history.js';
+import { createMonitorState } from './src/state.js';
 import { createMonitor } from './src/monitor.js';
 import { createStatusServer } from './src/server.js';
 import { createHeartbeat } from './src/heartbeat.js';
@@ -42,11 +43,14 @@ async function main() {
   printSummary(config);
 
   // A one-off run serves no status endpoint, and writing the shared history
-  // file would race with a monitor already running under PM2.
+  // or state file would race with a monitor already running under PM2.
   const history = config.web.enabled && !config.runOnce
     ? createHistory({ file: path.resolve(projectDir, config.web.historyFile), maxEntries: config.web.maxHistory, saveIntervalMs: config.web.saveIntervalMs })
     : null;
   await history?.load();
+  const monitorState = !config.runOnce
+    ? createMonitorState({ file: path.resolve(projectDir, config.state.file), saveIntervalMs: config.state.saveIntervalMs })
+    : null;
 
   const usageReader = process.platform === 'win32' && config.windowsUsageFallback ? createWindowsUsageReader() : null;
 
@@ -60,6 +64,7 @@ async function main() {
       timezone: config.timezone,
     }),
     history,
+    state: monitorState,
     // A one-off or dry run must not tell the heartbeat service that the scheduled monitor is alive.
     heartbeat: config.heartbeat.url && !config.dryRun && !config.runOnce
       ? createHeartbeat({ url: config.heartbeat.url, timeoutMs: config.heartbeat.timeoutMs })
@@ -76,7 +81,8 @@ async function main() {
 
   const server = config.web.enabled ? startServer(config, history, monitor) : null;
 
-  // The first check only records restart counts as a baseline and reports current problems.
+  // With no state file this only records restart counts. A saved file continues
+  // open alerts and reports restarts that happened while this process was down.
   await monitor.runCycle();
   const runScheduled = () => monitor.runCycle().catch((error) => console.error(`[Error] Check failed: ${error.stack || error.message}`));
   const task = cron.schedule(config.schedule, runScheduled, { timezone: config.timezone, name: 'pm2-monitor' });
@@ -91,7 +97,8 @@ async function main() {
     await task.stop();
     // Save first. monitor.stop() waits for restart watches, and a watch blocked
     // in `pm2 jlist` can outlast PM2's kill_timeout. History is not rewritten
-    // on every check, so this is the copy that has to land.
+    // on every check, so this is the copy that has to land. Stop also force-saves
+    // monitor state before that wait, then again after the watches settle.
     await history?.flush({ force: true });
     await monitor.stop();
     // Idle keep-alive connections would otherwise hold close() open until PM2 kills the process.
@@ -134,7 +141,9 @@ function printSummary(config) {
   console.log('Starting PM2 monitor.');
   console.log(`- Schedule: ${config.runOnce ? 'run once' : `${config.schedule} (${config.timezone})`}`);
   console.log(`- Slack: ${config.dryRun ? 'dry run (alerts are only logged)' : 'enabled'}`);
-  console.log(`- Thresholds: CPU > ${config.thresholds.cpu}%, Memory > ${config.thresholds.memoryMb}MB for ${config.resourceAlertSamples} check(s)`);
+  const overrides = [...config.appThresholds.keys()];
+  console.log(`- Thresholds: CPU > ${config.thresholds.cpu}%, Memory > ${config.thresholds.memoryMb}MB for ${config.resourceAlertSamples} check(s)${overrides.length > 0 ? `; per app: ${overrides.join(', ')}` : ''}`);
+  console.log(`- Monitor state: ${config.runOnce ? 'not saved (one-off run)' : config.state.file}`);
   console.log(`- Alert reminders: ${config.alertRepeatMs > 0 ? `every ${Math.round(config.alertRepeatMs / 60000)} min while a problem lasts` : 'off'}`);
   console.log(`- Excluded apps: ${config.excludedApps.join(', ') || 'none'}`);
   console.log(`- Ignored statuses: ${config.ignoreStatuses.join(', ') || 'none'}`);

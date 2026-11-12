@@ -8,8 +8,8 @@ const LOG_EXCERPT_MAX_CHARS = 1500;
 
 /**
  * Creates the monitor. All side effects (PM2 access, notifications, history,
- * heartbeat, log reading, time and sleeping) are injected so the behavior can
- * be tested without PM2 or Slack.
+ * heartbeat, log reading, state persistence, time and sleeping) are injected
+ * so the behavior can be tested without PM2 or Slack.
  */
 export function createMonitor({
   config,
@@ -18,6 +18,7 @@ export function createMonitor({
   history = null,
   heartbeat = null,
   readLog = null, // (file, lines) => Promise<string[]>, see src/logs.js
+  state = null, // { load, save }, see src/state.js. Null skips persistence (one-off runs).
   logger = console,
   now = () => Date.now(),
   sleep = (ms, signal) => delay(ms, undefined, { signal }),
@@ -35,8 +36,77 @@ export function createMonitor({
   const controller = new AbortController();
   let running = false;
   let lastCycleAt = null;
+  let stateRestored = false;
 
   const notify = ({ app, title, message, level }) => notifier.send({ app, title, message, level, now: new Date(now()) });
+
+  function limitsFor(name) {
+    const override = config.appThresholds.get(name);
+    if (!override) return config.thresholds;
+    return {
+      cpu: override.cpu ?? config.thresholds.cpu,
+      memoryMb: override.memoryMb ?? config.thresholds.memoryMb,
+    };
+  }
+
+  function snapshot() {
+    return {
+      version: 1,
+      lastCycleAt,
+      restartBaseline: Object.fromEntries(restartBaseline),
+      breaches: Object.fromEntries(breaches),
+      alerts: alerts.exportState(),
+      incidents: Object.fromEntries(incidents),
+      knownApps: Object.fromEntries(knownApps),
+      removedApps: Object.fromEntries(removedApps),
+    };
+  }
+
+  // A failed save must not fail the check. The store already logs IO errors.
+  async function saveState({ force = false } = {}) {
+    if (!state) return;
+    try {
+      await state.save(snapshot(), { force });
+    } catch (error) {
+      logger.error(`[Error] Failed to save monitor state: ${error.message}`);
+    }
+  }
+
+  // Once per process. A missing or unreadable file leaves the fresh baseline,
+  // which is the same as a monitor that has never run.
+  async function restoreState() {
+    if (stateRestored) return;
+    stateRestored = true;
+    if (!state) return;
+    try {
+      const saved = await state.load();
+      if (!saved || saved.version !== 1) return;
+      applySavedState(saved);
+    } catch (error) {
+      logger.error(`[Error] Failed to restore monitor state: ${error.message}`);
+    }
+  }
+
+  function applySavedState(saved) {
+    alerts.importState(saved.alerts);
+    for (const [key, count] of numberRecord(saved.restartBaseline)) restartBaseline.set(key, count);
+    for (const [key, count] of numberRecord(saved.breaches)) {
+      if (count > 0) breaches.set(key, count);
+    }
+    if (saved.incidents && typeof saved.incidents === 'object' && !Array.isArray(saved.incidents)) {
+      for (const [app, raw] of Object.entries(saved.incidents)) {
+        const incident = normalizeIncident(raw);
+        if (app && incident) incidents.set(app, incident);
+      }
+    }
+    knownApps = numberRecord(saved.knownApps);
+    for (const [app, count] of numberRecord(saved.removedApps)) {
+      if (count > 0) removedApps.set(app, count);
+    }
+    const cycleAt = finiteNumber(saved.lastCycleAt);
+    if (cycleAt !== null) lastCycleAt = cycleAt;
+    logger.log(`[Info] Restored monitor state: ${alerts.exportState().length} open alert(s), ${incidents.size} incident(s).`);
+  }
 
   /** Evaluates one alert condition and sends the matching notification. */
   async function handleCondition(key, isActive, signature, render) {
@@ -71,6 +141,7 @@ export function createMonitor({
     running = true;
     const startedAt = now();
     try {
+      await restoreState();
       let processes;
       try {
         processes = await listProcesses();
@@ -82,6 +153,7 @@ export function createMonitor({
           message: `Could not read the PM2 process list${action === 'repeat' ? ` (failing for ${formatDuration(now() - since)})` : ''}.\n${error.message}`,
           level: 'danger',
         }));
+        await saveState();
         return { ok: false, error };
       }
 
@@ -102,6 +174,8 @@ export function createMonitor({
         await history.flush();
       }
       lastCycleAt = startedAt;
+      // Before the heartbeat, so a crash while pinging still keeps this check.
+      await saveState();
       await heartbeat?.ping();
       return { ok: true, processes };
     } finally {
@@ -185,7 +259,12 @@ export function createMonitor({
 
     const watch = watchRestart(app, reference)
       .catch((error) => logger.error(`[Error] Restart watch for '${app}' failed: ${error.message}`))
-      .finally(() => watches.delete(app));
+      .finally(async () => {
+        watches.delete(app);
+        // The watch updates the incident after the cycle that started it has
+        // already saved. Persist that outcome too.
+        await saveState();
+      });
     watches.set(app, watch);
   }
 
@@ -420,14 +499,15 @@ export function createMonitor({
       if (!isOnline) continue;
       // Null means this check could not read usage. Leave the alert and the
       // consecutive-sample count alone; 0 would look like the process went idle.
+      const limits = limitsFor(name);
       if (cpu !== null) {
-        await checkResource(proc, `${key}::cpu`, cpu > config.thresholds.cpu, {
-          label: 'CPU', value: `${cpu}%`, threshold: `${config.thresholds.cpu}%`,
+        await checkResource(proc, `${key}::cpu`, cpu > limits.cpu, {
+          label: 'CPU', value: `${cpu}%`, threshold: `${limits.cpu}%`,
         });
       }
       if (memory !== null) {
-        await checkResource(proc, `${key}::memory`, memory > config.thresholds.memoryMb, {
-          label: 'Memory', value: `${memory}MB`, threshold: `${config.thresholds.memoryMb}MB`,
+        await checkResource(proc, `${key}::memory`, memory > limits.memoryMb, {
+          label: 'Memory', value: `${memory}MB`, threshold: `${limits.memoryMb}MB`,
         });
       }
     }
@@ -475,12 +555,18 @@ export function createMonitor({
     }),
     /** Waits for running restart watches to settle; used by tests. */
     idle: () => Promise.allSettled([...watches.values()]),
-    /** Lets a running check finish, then ends restart watches. Later checks are skipped. */
+    /**
+     * Lets a running check finish, then ends restart watches. Later checks are
+     * skipped. State is saved before the wait: a watch blocked in `pm2 jlist`
+     * can outlast PM2's kill_timeout, and the file is what the next process reads.
+     */
     async stop() {
       stopped = true;
+      await saveState({ force: true });
       controller.abort();
       await Promise.allSettled([...cycles]);
       await Promise.allSettled([...watches.values()]);
+      await saveState({ force: true });
     },
   };
 }
@@ -495,6 +581,35 @@ function newIncident() {
     recoveryAnnounced: false,
     flapping: false, // restarted again after it had been reported stable
     relapseAfter: null, // set while that relapse has not been delivered
+  };
+}
+
+function finiteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function numberRecord(value) {
+  const map = new Map();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return map;
+  for (const [key, item] of Object.entries(value)) {
+    const number = finiteNumber(item);
+    if (key && number !== null) map.set(key, number);
+  }
+  return map;
+}
+
+/** Drops a hand-edited incident that is not the shape the watch expects. */
+function normalizeIncident(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return {
+    notifiedAt: finiteNumber(value.notifiedAt),
+    restarts: finiteNumber(value.restarts) ?? 0,
+    failureNotifiedAt: finiteNumber(value.failureNotifiedAt),
+    failureSent: value.failureSent === true,
+    stableSince: finiteNumber(value.stableSince),
+    recoveryAnnounced: value.recoveryAnnounced === true,
+    flapping: value.flapping === true,
+    relapseAfter: finiteNumber(value.relapseAfter),
   };
 }
 

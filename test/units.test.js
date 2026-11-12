@@ -18,6 +18,9 @@ test('config: defaults load with a valid webhook', () => {
   assert.equal(config.windowsUsageFallback, true);
   assert.equal(config.web.saveIntervalMs, 5 * 60 * 1000);
   assert.equal(config.incidentStableMs, 10 * 60 * 1000);
+  assert.equal(config.state.file, './monitor-state.json');
+  assert.equal(config.state.saveIntervalMs, 0);
+  assert.equal(config.appThresholds.size, 0);
 });
 
 test('config: invalid values are reported instead of silently ignored', () => {
@@ -47,6 +50,23 @@ test('config: legacy THROTTLE_DURATION_MS still works and values are trimmed', (
   assert.equal(config.alertRepeatMs, 600000);
   assert.deepEqual(config.excludedApps, ['a', 'b']);
   assert.match(warnings.join(' '), /Rename it to ALERT_REPEAT_MS/);
+});
+
+test('config: per-app thresholds override cpu, memory, or both', () => {
+  const { config, errors } = loadConfig({ DRY_RUN: 'true', APP_THRESHOLDS: 'api:cpu=95:memoryMb=1024, worker:memoryMb=100' });
+  assert.deepEqual(errors, []);
+  assert.deepEqual(config.appThresholds.get('api'), { cpu: 95, memoryMb: 1024 });
+  assert.deepEqual(config.appThresholds.get('worker'), { memoryMb: 100 });
+  assert.equal(config.thresholds.cpu, 80);
+});
+
+test('config: a bad APP_THRESHOLDS entry is reported', () => {
+  const { errors } = loadConfig({ DRY_RUN: 'true', APP_THRESHOLDS: 'api:disk=1, :cpu=1, api:cpu=1:cpu=2, worker:cpu=80' });
+  const text = errors.join('\n');
+  assert.match(text, /invalid part "disk=1"/);
+  assert.match(text, /must look like/);
+  assert.match(text, /sets cpu more than once/);
+  assert.doesNotMatch(text, /worker/);
 });
 
 test('config: a short 1.x THROTTLE_DURATION_MS is not used as the reminder interval', () => {
@@ -114,6 +134,26 @@ test('alerts: an undelivered resolve is returned again, and a relapse continues 
   // Back before the resolve got through: still the same problem for the recipient.
   assert.equal(tracker.evaluate('k', true, 300), null);
   assert.equal(tracker.evaluate('k', true, 1000), 'repeat');
+});
+
+test('alerts: exported state restores an open condition and a pending resolve', () => {
+  const tracker = new AlertTracker({ repeatMs: 1000 });
+  tracker.evaluate('cpu', true, 0, 'high');
+  tracker.markSent('cpu', 0);
+  tracker.evaluate('down', true, 0, 'errored');
+  tracker.markSent('down', 0);
+  assert.equal(tracker.evaluate('down', false, 100, 'errored'), 'resolve');
+
+  const copy = new AlertTracker({ repeatMs: 1000 });
+  copy.importState(tracker.exportState());
+  assert.equal(copy.evaluate('cpu', true, 500, 'high'), null);
+  assert.equal(copy.evaluate('cpu', true, 1000, 'high'), 'repeat');
+  assert.equal(copy.evaluate('down', false, 200, 'errored'), 'resolve');
+
+  // Malformed entries are skipped and do not clear what was restored.
+  copy.importState([{ key: '', since: 0 }, { since: 1 }, null, { key: 'ok', since: 5, lastSentAt: 5, signature: 's', resolving: true }]);
+  assert.equal(copy.evaluate('ok', false, 6, 's'), 'resolve');
+  assert.equal(copy.since('cpu'), 0);
 });
 
 test('alerts: an unsent alert is not resolved', () => {

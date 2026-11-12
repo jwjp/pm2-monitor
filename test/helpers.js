@@ -7,8 +7,26 @@ export function proc(name, pmId, overrides = {}) {
   return { pm_id: pmId, name, pid: 1000 + pmId, status: 'online', restarts: 0, cpu: 1, memory: 50, uptimeStartedAt: null, ...overrides };
 }
 
+/**
+ * In-memory stand-in for src/state.js. Snapshots are cloned the way the file
+ * store clones them (JSON), so later mutations do not change what was saved.
+ */
+export function memoryState(initial = null) {
+  const box = { saved: initial, saves: 0 };
+  return {
+    box,
+    async load() {
+      return box.saved;
+    },
+    async save(snapshot) {
+      box.saved = JSON.parse(JSON.stringify(snapshot));
+      box.saves += 1;
+    },
+  };
+}
+
 /** Builds a monitor wired to an in-memory PM2 state, clock and notifier. */
-export function setup({ env = {}, processes = [], deliver = true } = {}) {
+export function setup({ env = {}, processes = [], deliver = true, monitorState = null } = {}) {
   const { config, errors } = loadConfig({ DRY_RUN: 'true', ...env });
   if (errors.length) throw new Error(errors.join('\n'));
 
@@ -37,6 +55,7 @@ export function setup({ env = {}, processes = [], deliver = true } = {}) {
       if (!state.logs[file]) throw new Error(`ENOENT: no such file '${file}'`);
       return state.logs[file].slice(-lines);
     },
+    state: monitorState,
     now: () => state.clock,
     sleep: async (ms) => {
       state.clock += ms;

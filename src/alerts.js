@@ -80,4 +80,34 @@ export class AlertTracker {
       if (!keepKey(key)) this.active.delete(key);
     }
   }
+
+  /** Plain data for the state file. `lastSentAt` stays null until a send lands. */
+  exportState() {
+    return [...this.active.entries()].map(([key, entry]) => ({
+      key,
+      since: entry.since,
+      lastSentAt: entry.lastSentAt,
+      signature: entry.signature ?? '',
+      resolving: entry.resolving === true,
+    }));
+  }
+
+  /**
+   * Restores conditions saved by `exportState`. Malformed entries are skipped.
+   * A pending resolve is only kept when the alert was actually sent.
+   */
+  importState(entries) {
+    if (!Array.isArray(entries)) return;
+    for (const entry of entries) {
+      if (!entry || typeof entry.key !== 'string' || entry.key === '') continue;
+      if (typeof entry.since !== 'number' || !Number.isFinite(entry.since)) continue;
+      const lastSentAt = typeof entry.lastSentAt === 'number' && Number.isFinite(entry.lastSentAt) ? entry.lastSentAt : null;
+      this.active.set(entry.key, {
+        since: entry.since,
+        lastSentAt,
+        signature: typeof entry.signature === 'string' ? entry.signature : '',
+        resolving: entry.resolving === true && lastSentAt !== null,
+      });
+    }
+  }
 }

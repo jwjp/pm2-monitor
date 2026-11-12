@@ -92,6 +92,50 @@ export function loadConfig(env = process.env, argv = []) {
     return raw;
   };
 
+  // "api:cpu=90:memoryMb=1024, worker:memoryMb=200". A missing part keeps the
+  // global threshold. Names cannot contain ":" or "," — PM2 allows both, and
+  // those names have to use the global threshold.
+  const appThresholds = () => {
+    const raw = read('APP_THRESHOLDS');
+    const map = new Map();
+    if (raw === undefined) return map;
+
+    for (const entry of raw.split(',')) {
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      const pieces = trimmed.split(':');
+      const name = pieces[0].trim();
+      const parts = pieces.slice(1).map((part) => part.trim());
+      if (!name || parts.length === 0 || parts.some((part) => part === '')) {
+        errors.push(`APP_THRESHOLDS entry "${trimmed}" must look like "app:cpu=90" or "app:cpu=90:memoryMb=1024".`);
+        continue;
+      }
+      if (map.has(name)) {
+        errors.push(`APP_THRESHOLDS lists "${name}" more than once.`);
+        continue;
+      }
+
+      const override = {};
+      let ok = true;
+      for (const part of parts) {
+        const match = /^(cpu|memoryMb)=(\d+(?:\.\d+)?)$/.exec(part);
+        if (!match) {
+          errors.push(`APP_THRESHOLDS entry "${trimmed}" has invalid part "${part}". Use cpu=<number> or memoryMb=<number>.`);
+          ok = false;
+          continue;
+        }
+        if (Object.hasOwn(override, match[1])) {
+          errors.push(`APP_THRESHOLDS entry "${trimmed}" sets ${match[1]} more than once.`);
+          ok = false;
+          continue;
+        }
+        override[match[1]] = Number(match[2]);
+      }
+      if (ok) map.set(name, override);
+    }
+    return map;
+  };
+
   const dryRun = flags.has('--dry-run') || boolean('DRY_RUN', false);
 
   const config = {
@@ -113,6 +157,8 @@ export function loadConfig(env = process.env, argv = []) {
       cpu: number('CPU_THRESHOLD', 80, { min: 0 }),
       memoryMb: number('MEMORY_THRESHOLD_MB', 450, { min: 0 }),
     },
+    // App name -> { cpu?, memoryMb? }. Absent fields use `thresholds`.
+    appThresholds: appThresholds(),
     resourceAlertSamples: number('RESOURCE_ALERT_SAMPLES', 2, { min: 1, integer: true }),
     alertRepeatMs: alertRepeatMs(),
     // How long an app must stay up after a restart before its incident closes.
@@ -137,6 +183,12 @@ export function loadConfig(env = process.env, argv = []) {
       historyFile: string('STATUS_LOG_FILE', './status-history.json'),
       maxHistory: number('MAX_HISTORY', 1440, { min: 1, integer: true }),
       saveIntervalMs: number('STATUS_SAVE_INTERVAL_MS', 5 * MINUTE_MS, { min: 0 }),
+    },
+    // Alert and incident state. Separate from the status history: it has to
+    // land even when the HTTP endpoint is off, and one-off runs must not write it.
+    state: {
+      file: string('STATE_FILE', './monitor-state.json'),
+      saveIntervalMs: number('STATE_SAVE_INTERVAL_MS', 0, { min: 0 }),
     },
   };
 

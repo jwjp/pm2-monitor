@@ -13,7 +13,11 @@ attention, and sends a follow-up when the problem clears.
   optionally as a reminder while it lasts (`ALERT_REPEAT_MS`), and once more
   when it is resolved. Crash loops do not flood the channel.
 - **Spike filtering.** CPU and memory alerts fire only after
-  `RESOURCE_ALERT_SAMPLES` consecutive checks above the threshold.
+  `RESOURCE_ALERT_SAMPLES` consecutive checks above the threshold. Individual
+  apps can use a higher or lower limit (`APP_THRESHOLDS`).
+- **State survives a restart of the monitor.** Open alerts, restart counts,
+  incidents and an undelivered "App Removed" are written to `STATE_FILE`, so
+  the next process continues them instead of starting over.
 - **Strict configuration.** Invalid settings stop the monitor at startup with a
   message that names the variable, instead of falling back to a default without
   telling you.
@@ -81,10 +85,18 @@ With `RESTART_LOG_LINES` set, "Process Restart Detected" and "Restart Failed"
 end with the last lines of the instance's PM2 error log (`pm2 logs --err`),
 cut to about 1500 characters.
 
-The first check after startup only records restart counts, so restarts that
-happened before the monitor started are not reported. Checks run only on the
-`CRON_SCHEDULE`; with the default business-hours schedule, a restart overnight
-is reported at the first check of the next morning (the alert says since when).
+The first check when no state file exists only records restart counts, so
+restarts that happened before the monitor ever ran are not reported. After
+that, the schedule writes `STATE_FILE`. A later start of the monitor,
+including after a crash or `pm2 restart`, compares against that file: restarts
+while it was down are reported, and an alert that is still open is not sent
+again. One-off runs do not read or write the file. A restart watch that was
+in progress is not resumed; the next check sends the recovery if the app is
+healthy, or the usual status alert if it is not.
+
+Checks run only on the `CRON_SCHEDULE`; with the default business-hours
+schedule, a restart overnight is reported at the first check of the next
+morning (the alert says since when).
 
 ## Configuration reference
 
@@ -100,6 +112,7 @@ is reported at the first check of the next morning (the alert says since when).
 | `WINDOWS_USAGE_FALLBACK` | `true` | Windows only: when PM2 reports 0 memory for an online process, read CPU/memory from Windows (`Get-Process`) instead. |
 | `CPU_THRESHOLD` | `80` | CPU percentage alert threshold. |
 | `MEMORY_THRESHOLD_MB` | `450` | Memory alert threshold in MB. |
+| `APP_THRESHOLDS` | empty | Per-app overrides, comma-separated: `api:cpu=95:memoryMb=1024, worker:memoryMb=200`. `cpu` and `memoryMb` are optional; an omitted one keeps the global threshold. App names cannot contain `:` or `,`. |
 | `RESOURCE_ALERT_SAMPLES` | `2` | Consecutive checks above a threshold before alerting. |
 | `ALERT_REPEAT_MS` | `1800000` (30 min) | Reminder interval while a problem lasts; `0` turns reminders off. `THROTTLE_DURATION_MS` is accepted as the old name (values under 5 min are ignored with a warning). |
 | `INCIDENT_STABLE_MS` | `600000` (10 min) | How long an app must stay up after a restart before the incident closes. A restart within this time is reported once as a relapse, and later ones are logged until the app stays up this long. `0` closes the incident at the first success. |
@@ -117,6 +130,8 @@ is reported at the first check of the next morning (the alert says since when).
 | `MAX_HISTORY` | `1440` | Number of snapshots to keep. |
 | `STATUS_SAVE_INTERVAL_MS` | `300000` (5 min) | How often the history file is rewritten; `0` saves after every check. Unsaved snapshots are written on shutdown. |
 | `STATUS_TOKEN` | empty | Bearer token for `/status`. Required when `HOST` is not a loopback address. |
+| `STATE_FILE` | `./monitor-state.json` | Alert and incident state. A relative path is relative to the project directory. Not read or written by one-off runs. |
+| `STATE_SAVE_INTERVAL_MS` | `0` | How often that file is rewritten; `0` saves after every check and after each restart watch. Shutdown always saves. |
 
 ## Heartbeat
 
@@ -155,11 +170,22 @@ By default the endpoint binds to `127.0.0.1`. If you set `HOST=0.0.0.0`, also
 set `STATUS_TOKEN`; otherwise `/status` answers 401. `/healthz` needs no token,
 but lists the apps under a restart watch (`watchingRestarts`) only to clients
 that may read `/status`. One-off runs (`--once`, `npm run dry-run`) neither
-start the endpoint nor write `status-history.json`.
+start the endpoint nor write `status-history.json` or `monitor-state.json`.
 
 ```bash
 curl -H "Authorization: Bearer $STATUS_TOKEN" http://127.0.0.1:3031/status?limit=5
 ```
+
+## Upgrading from 3.0
+
+- **Open alerts survive a restart of the monitor.** The scheduled process
+  writes `monitor-state.json` (`STATE_FILE`). The first run after this upgrade
+  still has no file, so it only records a baseline. From the next run on, a
+  restart of the monitor reports restarts that happened while it was down and
+  does not repeat an alert that is still open. One-off runs leave the file
+  alone. Delete the file to force a fresh baseline.
+- **Per-app thresholds** are optional (`APP_THRESHOLDS`). When unset, every
+  app still uses `CPU_THRESHOLD` and `MEMORY_THRESHOLD_MB`.
 
 ## Upgrading from 2.x
 
@@ -242,6 +268,7 @@ src/monitor.js     restart detection, follow-up checks, status/resource alerts
 src/alerts.js      alert state (start, reminder, resolve)
 src/notifier.js    Slack payloads and delivery (or dry-run logging)
 src/history.js     in-memory status history persisted to a JSON file
+src/state.js       alert and incident state persisted across monitor restarts
 src/server.js      /healthz and /status endpoints
 test/              tests (npm test)
 ```
@@ -251,7 +278,7 @@ test/              tests (npm test)
 - Do not commit real Slack webhook URLs. Keep `.env` private; `.env.example` is safe to commit.
 - `RESTART_LOG_LINES` sends lines of your apps' error logs to Slack. Enable it
   only if those logs do not contain secrets or personal data.
-- `status-history.json` is runtime data and is ignored by Git.
+- `status-history.json` and `monitor-state.json` are runtime data and are ignored by Git.
 - Keep dependencies patched with Dependabot and `npm audit`.
 
 ## License

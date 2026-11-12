@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { proc, setup } from './helpers.js';
+import { memoryState, proc, setup } from './helpers.js';
 import { formatDuration } from '../src/monitor.js';
 
 const MINUTE = 60 * 1000;
@@ -562,6 +562,125 @@ test('restarting a stopped app is not also reported as back online', async () =>
   await t.monitor.runCycle();
 
   assert.deepEqual(t.titles(), ['Process Status Alert', 'Process Restart Detected', 'Restart Successful']);
+});
+
+test('an app can raise its own CPU and memory thresholds', async () => {
+  const t = setup({
+    env: { CPU_THRESHOLD: '80', MEMORY_THRESHOLD_MB: '450', RESOURCE_ALERT_SAMPLES: '1', APP_THRESHOLDS: 'api:cpu=95:memoryMb=1024' },
+    processes: [proc('api', 0, { cpu: 90, memory: 800 }), proc('worker', 1, { cpu: 90, memory: 100 })],
+  });
+  await t.monitor.runCycle();
+  assert.deepEqual(t.titles(), ['High CPU Usage']);
+  assert.equal(t.sent[0].app, 'worker');
+  assert.match(t.sent[0].message, /threshold 80%/);
+});
+
+test('saved state reports restarts that happened while the monitor was down', async () => {
+  const store = memoryState();
+  const first = setup({ monitorState: store, processes: [proc('api', 0, { restarts: 2 })] });
+  await first.monitor.runCycle();
+  await first.monitor.stop();
+  assert.deepEqual(first.titles(), []);
+
+  const second = setup({ monitorState: store, processes: [proc('api', 0, { restarts: 4 })] });
+  await second.monitor.runCycle();
+  await second.monitor.idle();
+  assert.equal(second.titles()[0], 'Process Restart Detected');
+  assert.match(second.sent[0].message, /Detected 2 restart\(s\)/);
+});
+
+test('a restored resource alert continues instead of firing again', async () => {
+  const store = memoryState();
+  const env = { RESOURCE_ALERT_SAMPLES: '1', CPU_THRESHOLD: '80' };
+  const first = setup({ monitorState: store, env, processes: [proc('api', 0, { cpu: 90 })] });
+  await first.monitor.runCycle();
+  await first.monitor.stop();
+  assert.deepEqual(first.titles(), ['High CPU Usage']);
+
+  const second = setup({ monitorState: store, env, processes: [proc('api', 0, { cpu: 90 })] });
+  await second.monitor.runCycle();
+  assert.deepEqual(second.titles(), []);
+
+  second.state.processes = [proc('api', 0, { cpu: 10 })];
+  await second.monitor.runCycle();
+  assert.deepEqual(second.titles(), ['CPU Usage Back to Normal']);
+});
+
+test('a resource breach streak survives a restart of the monitor', async () => {
+  const store = memoryState();
+  const env = { RESOURCE_ALERT_SAMPLES: '2', CPU_THRESHOLD: '80' };
+  const first = setup({ monitorState: store, env, processes: [proc('api', 0, { cpu: 90 })] });
+  await first.monitor.runCycle();
+  await first.monitor.stop();
+  assert.deepEqual(first.titles(), []);
+
+  const second = setup({ monitorState: store, env, processes: [proc('api', 0, { cpu: 90 })] });
+  await second.monitor.runCycle();
+  assert.deepEqual(second.titles(), ['High CPU Usage']);
+});
+
+test('a restored monitoring failure is not reported as a new outage', async () => {
+  const store = memoryState();
+  const env = { ALERT_REPEAT_MS: '600000' };
+  const first = setup({ monitorState: store, env });
+  first.state.fail = new Error('pm2 down');
+  await first.monitor.runCycle();
+  await first.monitor.stop();
+  assert.deepEqual(first.titles(), ['Monitoring Failed']);
+
+  const second = setup({ monitorState: store, env });
+  second.state.fail = new Error('pm2 down');
+  await second.monitor.runCycle();
+  assert.deepEqual(second.titles(), []);
+  second.advance(600000);
+  await second.monitor.runCycle();
+  assert.deepEqual(second.titles(), ['Monitoring Still Failing']);
+});
+
+test('an open incident stays quiet when the monitor process restarts', async () => {
+  const store = memoryState();
+  const env = { ALERT_REPEAT_MS: '600000' };
+  const first = setup({ monitorState: store, env, processes: [proc('api', 0)] });
+  await first.monitor.runCycle();
+  first.state.processes = [proc('api', 0, { restarts: 1, status: 'errored' })];
+  first.advance(MINUTE);
+  await first.monitor.runCycle();
+  await first.monitor.idle();
+  await first.monitor.stop();
+  assert.deepEqual(first.titles(), ['Process Restart Detected', 'Restart Failed']);
+
+  const second = setup({ monitorState: store, env, processes: [proc('api', 0, { restarts: 4, status: 'errored' })] });
+  await second.monitor.runCycle();
+  await second.monitor.idle();
+  assert.deepEqual(second.titles(), []);
+});
+
+test('an undelivered App Removed is retried from the saved state', async () => {
+  const store = memoryState();
+  const first = setup({ monitorState: store, deliver: false, processes: [proc('api', 0), proc('api', 1)] });
+  await first.monitor.runCycle();
+  first.state.processes = [];
+  await first.monitor.runCycle();
+  await first.monitor.stop();
+  assert.deepEqual(first.titles(), ['App Removed']);
+  assert.equal(store.box.saved.removedApps.api, 2);
+
+  const second = setup({ monitorState: store, processes: [] });
+  await second.monitor.runCycle();
+  assert.deepEqual(second.titles(), ['App Removed']);
+  assert.equal(store.box.saved.removedApps.api, undefined);
+});
+
+test('unusable saved state is ignored and the first check stays a baseline', async () => {
+  const store = memoryState({ version: 1, restartBaseline: 'nope', alerts: { bad: true }, incidents: { api: 'x' } });
+  const t = setup({ monitorState: store, processes: [proc('api', 0, { restarts: 4, cpu: 99 })] });
+  await t.monitor.runCycle();
+  assert.deepEqual(t.titles(), []);
+
+  const unknown = memoryState({ version: 99, restartBaseline: { 'api#0': 1 } });
+  const u = setup({ monitorState: unknown, processes: [proc('api', 0, { restarts: 5 })] });
+  await u.monitor.runCycle();
+  assert.deepEqual(u.titles(), []);
 });
 
 test('formatDuration renders compact durations', () => {

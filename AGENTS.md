@@ -48,19 +48,22 @@ src/alerts.js      AlertTracker: per-condition state (fire / repeat / resolve)
 src/notifier.js    createNotifier({...}).send(alert) -> Promise<boolean>; Slack payloads
 src/history.js     in-memory history (newest first), atomic JSON file persistence,
                    saved at most every saveIntervalMs (flush({ force }) on shutdown)
+src/state.js       createMonitorState({ file, saveIntervalMs, now }): alert and
+                   incident state, same atomic write and retry rules as history
 src/server.js      createStatusServer({...}): /healthz, /status, /status/latest
-test/helpers.js    setup(): monitor with fake PM2 state, clock, sleep and notifier
+test/helpers.js    setup(): monitor with fake PM2 state, clock, sleep and notifier.
+                   memoryState() stands in for the state file
 test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
-                   usage reader and history persistence, log tail and heartbeat
-                   (operations.test.js)
+                   usage reader, history and monitor-state persistence, log tail
+                   and heartbeat (operations.test.js)
 ```
 
 ## Design rules (keep these when changing code)
 
 1. **Inject side effects.** `createMonitor` receives `listProcesses`, `notifier`,
-   `history`, `heartbeat`, `readLog`, `now`, `sleep` and `logger`. Never call
-   PM2, Slack, the file system, `Date.now()` or timers directly inside
-   `src/monitor.js`; otherwise the tests cannot control them.
+   `history`, `heartbeat`, `readLog`, `state`, `now`, `sleep` and `logger`.
+   Never call PM2, Slack, the file system, `Date.now()` or timers directly
+   inside `src/monitor.js`; otherwise the tests cannot control them.
 2. **One alert per problem.** Every condition goes through `AlertTracker` with a
    stable key: `"<app>#<pm_id>::status|cpu|memory"` or `"monitor::pm2"`.
    - `fire` when a condition starts or its signature changes (e.g. status
@@ -74,8 +77,10 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
    marked as sent, and an incident closed, only after delivery.
    Do not reintroduce a plain time-based throttle.
 3. **Restarts are tracked per instance** (`<name>#<pm_id>`) and grouped per app.
-   The first check after startup only sets the baseline. A lower restart count
-   (e.g. after `pm2 reset`) resets the baseline without alerting.
+   The first check with no saved state only sets the baseline. A lower restart
+   count (e.g. after `pm2 reset`) resets the baseline without alerting. A
+   saved baseline is compared on the next process start, so restarts during
+   downtime are reported.
 4. **Restart watches** (`watchRestart`) poll every `recheck.intervalMs` up to
    `recheck.maxAttempts` times. Success requires every instance `online` *and*
    no new restarts since the previous poll. `errored` fails immediately. While
@@ -96,9 +101,9 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
    instances as already sent, so the next check does not repeat the same
    `errored` state as "Process Status Alert" (reminders still follow).
 6. **Never throw out of a cycle.** `notifier.send` returns `false` instead of
-   throwing, `history.flush` logs instead of throwing, and `runCycle` turns PM2
-   failures into the `monitor::pm2` condition. `runCycle` skips itself if the
-   previous run is still in progress.
+   throwing, `history.flush` and `state.save` log instead of throwing, and
+   `runCycle` turns PM2 failures into the `monitor::pm2` condition. `runCycle`
+   skips itself if the previous run is still in progress.
 7. **Config fails loudly.** Add new settings in `src/config.js` through the
    `string/number/boolean/list` helpers with explicit bounds; invalid values
    must become an entry in `errors`, not a silent fallback. A deprecated or
@@ -125,6 +130,21 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
     the `Host` header (a malformed Host used to crash the process). `/status`
     needs a Bearer token compared with `timingSafeEqual`, or a loopback bind
     address when no token is set. Do not accept tokens in query strings.
+12. **Monitor state** (`src/state.js`) is the alert machine, separate from the
+    status history. It stores restart baselines, `AlertTracker` entries
+    (including a resolve that has not been delivered), breach streaks,
+    incidents, known apps and undelivered "App Removed" entries. Version is
+    `1`; anything else is ignored with a warning and the check starts from a
+    baseline. One-off runs pass `state: null` so they cannot race a live
+    monitor. An in-progress restart watch is not resumed after a process
+    restart: the next check recovers the incident if the app is healthy, or
+    reports status if it is not. Shutdown force-saves before it waits for
+    watches, then again after they settle. `STATE_SAVE_INTERVAL_MS` defaults
+    to 0 because the file is small and a missed save is a missed or repeated
+    alert.
+13. **Per-app thresholds** (`config.appThresholds`, from `APP_THRESHOLDS`)
+    override cpu, memoryMb, or both for one app name. An omitted field keeps
+    the global threshold. The alert text shows the threshold that was used.
 
 ## Platform gotchas
 
@@ -146,10 +166,11 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
   serialized, because a check and a restart watch can read at the same time.
 - **Windows cannot deliver SIGINT** to the monitor, so `ecosystem.config.cjs`
   sets `shutdown_with_message` and `pm2-monitor.js` also shuts down on the
-  `'shutdown'` IPC message. Shutdown force-saves history before it waits for
-  restart watches. A watch blocked in `pm2 jlist` can outlast `kill_timeout`,
-  and the file is no longer rewritten on every check. A failed write clears
-  its timestamp so the next flush retries inside `saveIntervalMs`.
+  `'shutdown'` IPC message. Shutdown force-saves history, then monitor state,
+  before it waits for restart watches. A watch blocked in `pm2 jlist` can
+  outlast `kill_timeout`. History is not rewritten on every check; monitor
+  state is, unless `STATE_SAVE_INTERVAL_MS` says otherwise. A failed write
+  clears its timestamp so the next flush retries inside the interval.
 - **cmd.exe messages use the console code page** (e.g. CP949), not UTF-8;
   `decodeConsoleOutput` handles that for `jlist` errors.
 - **dotenv does not override** variables already set in the process
@@ -166,7 +187,8 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
   before each watch poll; `t.state.fail` makes PM2 fail; `deliver: false` /
   `t.state.deliver` simulates Slack failures. `t.state.logs[path] = [lines]`
   provides error logs (give the process an `errLogPath`), and `t.state.pings`
-  counts heartbeats.
+  counts heartbeats. Pass `monitorState: memoryState()` to continue a second
+  `setup()` from the first monitor's saved alerts and baselines.
 - To check against a **real PM2 without touching the user's PM2**, install PM2
   in a temporary directory and isolate its daemon with `PM2_HOME`:
 

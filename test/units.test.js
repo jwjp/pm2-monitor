@@ -14,6 +14,9 @@ test('config: defaults load with a valid webhook', () => {
   assert.equal(config.alertRepeatMs, 30 * 60 * 1000);
   assert.equal(config.resourceAlertSamples, 2);
   assert.equal(config.web.host, '127.0.0.1');
+  assert.equal(config.timezone, 'Asia/Seoul');
+  assert.equal(config.windowsUsageFallback, true);
+  assert.equal(config.web.saveIntervalMs, 5 * 60 * 1000);
 });
 
 test('config: invalid values are reported instead of silently ignored', () => {

@@ -75,8 +75,10 @@ export function loadConfig(env = process.env, argv = []) {
   const config = {
     pm2Bin: string('PM2_BIN', process.platform === 'win32' ? 'pm2.cmd' : 'pm2'),
     schedule: string('CRON_SCHEDULE', '*/1 8-19 * * 1-5'),
-    timezone: string('CRON_TIMEZONE', 'America/New_York'),
+    timezone: string('CRON_TIMEZONE', 'Asia/Seoul'),
     excludedApps: list('EXCLUDED_APPS', ['pm2-monitor', 'pm2-logrotate']),
+    // Only used on Windows: read CPU/memory from the OS when PM2 reports 0.
+    windowsUsageFallback: boolean('WINDOWS_USAGE_FALLBACK', true),
     runOnce: flags.has('--once') || boolean('RUN_ONCE', false),
     dryRun,
     slack: {
@@ -100,6 +102,7 @@ export function loadConfig(env = process.env, argv = []) {
       token: read('STATUS_TOKEN'),
       historyFile: string('STATUS_LOG_FILE', './status-history.json'),
       maxHistory: number('MAX_HISTORY', 1440, { min: 1, integer: true }),
+      saveIntervalMs: number('STATUS_SAVE_INTERVAL_MS', 5 * MINUTE_MS, { min: 0 }),
     },
   };
 

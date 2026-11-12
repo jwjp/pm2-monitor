@@ -26,22 +26,28 @@ npm start           # pm2 start ecosystem.config.cjs
 ```
 
 Run `npm test` after every change. All tests must pass before committing.
+CI (`.github/workflows/test.yml`) runs `npm run check` on Linux and Windows
+for every supported Node version.
 
 ## Layout
 
 ```text
 pm2-monitor.js     entry point: loads .env, validates config, wires modules,
                    runs the first check, schedules the rest, handles SIGINT/SIGTERM
-src/config.js      loadConfig(env, argv) -> { config, errors }; pure, no side effects
-src/pm2.js         listPm2Processes(config), parseJlist(stdout, excludedApps)
+src/config.js      loadConfig(env, argv) -> { config, errors, warnings }; pure, no side effects
+src/pm2.js         listPm2Processes(config, { usageReader }), parseJlist(stdout, excludedApps),
+                   fillMissingUsage, decodeConsoleOutput (cmd.exe code page)
+src/usage.js       createWindowsUsageReader({ run, now }): CPU/memory via Get-Process
 src/monitor.js     createMonitor({...}): restart detection, restart watches,
                    status/resource conditions, incidents; the core logic
 src/alerts.js      AlertTracker: per-condition state (fire / repeat / resolve)
 src/notifier.js    createNotifier({...}).send(alert) -> Promise<boolean>; Slack payloads
-src/history.js     in-memory history (newest first), atomic JSON file persistence
+src/history.js     in-memory history (newest first), atomic JSON file persistence,
+                   saved at most every saveIntervalMs (flush({ force }) on shutdown)
 src/server.js      createStatusServer({...}): /healthz, /status, /status/latest
 test/helpers.js    setup(): monitor with fake PM2 state, clock, sleep and notifier
-test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units
+test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units,
+                   usage reader and history persistence
 ```
 
 ## Design rules (keep these when changing code)
@@ -98,6 +104,16 @@ test/*.test.js     monitor behavior, server, config/pm2/alerts/notifier units
   before the JSON; `parseJlist` handles this. Keep a test for it.
 - **CPU/memory are 0 on recent Windows 11** because PM2's `wmic`-based usage
   reading is unavailable. This is not a parsing bug; check the raw `jlist`.
+  `fillMissingUsage` fills them from `src/usage.js` (PowerShell `Get-Process`)
+  only for online processes with 0 memory, so hosts where PM2 works are
+  untouched. CPU is the CPU-time delta between two readings of the same pid
+  (percent of one core, like PM2), so the first reading has no CPU value. Pids
+  are passed through an environment variable, never interpolated into the script.
+- **Windows cannot deliver SIGINT** to the monitor, so `ecosystem.config.cjs`
+  sets `shutdown_with_message` and `pm2-monitor.js` also shuts down on the
+  `'shutdown'` IPC message. Shutdown force-saves the history.
+- **cmd.exe messages use the console code page** (e.g. CP949), not UTF-8;
+  `decodeConsoleOutput` handles that for `jlist` errors.
 - **dotenv does not override** variables already set in the process
   environment. That is why `ecosystem.config.cjs` must not set an `env` block
   for settings users configure in `.env`.

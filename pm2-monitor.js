@@ -16,6 +16,7 @@ import dotenv from 'dotenv';
 import cron from 'node-cron';
 import { loadConfig, isLoopbackHost } from './src/config.js';
 import { listPm2Processes } from './src/pm2.js';
+import { createWindowsUsageReader } from './src/usage.js';
 import { createNotifier } from './src/notifier.js';
 import { createHistory } from './src/history.js';
 import { createMonitor } from './src/monitor.js';
@@ -38,13 +39,15 @@ async function main() {
   // A one-off run serves no status endpoint, and writing the shared history
   // file would race with a monitor already running under PM2.
   const history = config.web.enabled && !config.runOnce
-    ? createHistory({ file: config.web.historyFile, maxEntries: config.web.maxHistory })
+    ? createHistory({ file: config.web.historyFile, maxEntries: config.web.maxHistory, saveIntervalMs: config.web.saveIntervalMs })
     : null;
   await history?.load();
 
+  const usageReader = process.platform === 'win32' && config.windowsUsageFallback ? createWindowsUsageReader() : null;
+
   const monitor = createMonitor({
     config,
-    listProcesses: () => listPm2Processes(config),
+    listProcesses: () => listPm2Processes(config, { usageReader }),
     notifier: createNotifier({
       webhookUrl: config.slack.webhookUrl,
       timeoutMs: config.slack.timeoutMs,
@@ -83,9 +86,16 @@ async function main() {
       server.close(resolve);
       server.closeAllConnections?.();
     });
+    // History is saved only every STATUS_SAVE_INTERVAL_MS, so save the rest now.
+    await history?.flush({ force: true });
     process.exit(0);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
+  // Windows cannot deliver SIGINT to a process; with `shutdown_with_message`
+  // (ecosystem.config.cjs) PM2 sends this message instead.
+  process.on('message', (message) => {
+    if (message === 'shutdown') shutdown('shutdown message');
+  });
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
@@ -115,6 +125,9 @@ function printSummary(config) {
   console.log(`- Alert reminders: ${config.alertRepeatMs > 0 ? `every ${Math.round(config.alertRepeatMs / 60000)} min while a problem lasts` : 'off'}`);
   console.log(`- Excluded apps: ${config.excludedApps.join(', ') || 'none'}`);
   console.log(`- PM2 binary: ${config.pm2Bin}`);
+  if (process.platform === 'win32') {
+    console.log(`- CPU/memory fallback: ${config.windowsUsageFallback ? 'on (read from Windows when PM2 reports 0)' : 'off'}`);
+  }
 }
 
 main().catch((error) => {

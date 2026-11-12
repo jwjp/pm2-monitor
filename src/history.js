@@ -5,9 +5,11 @@ import fs from 'node:fs/promises';
  * file so history survives restarts. The file is rewritten atomically via a
  * temporary file and rename.
  */
-export function createHistory({ file, maxEntries, logger = console }) {
+export function createHistory({ file, maxEntries, saveIntervalMs = 0, now = () => Date.now(), logger = console }) {
   let entries = [];
   let writing = Promise.resolve();
+  let savedAt = null;
+  let dirty = false;
 
   return {
     async load() {
@@ -28,14 +30,23 @@ export function createHistory({ file, maxEntries, logger = console }) {
     add(snapshot) {
       entries.unshift(snapshot);
       if (entries.length > maxEntries) entries.length = maxEntries;
+      dirty = true;
     },
 
     list(limit = maxEntries) {
       return entries.slice(0, limit);
     },
 
-    /** Writes the history to disk. Writes are serialized and never throw. */
-    flush() {
+    /**
+     * Writes the history to disk. Writes are serialized and never throw. The
+     * whole file is rewritten each time, so unless `force` is set it is saved
+     * at most every `saveIntervalMs`; the shutdown path forces a final save.
+     */
+    flush({ force = false } = {}) {
+      if (!dirty) return writing;
+      if (!force && savedAt !== null && now() - savedAt < saveIntervalMs) return writing;
+      savedAt = now();
+      dirty = false;
       const data = JSON.stringify(entries);
       writing = writing.then(async () => {
         const tmpFile = `${file}.${process.pid}.tmp`;
@@ -44,6 +55,7 @@ export function createHistory({ file, maxEntries, logger = console }) {
           await fs.rename(tmpFile, file);
         } catch (error) {
           logger.error(`[Error] Failed to write ${file}: ${error.message}`);
+          dirty = true; // Retried at the next flush.
           await fs.rm(tmpFile, { force: true }).catch(() => {});
         }
       });
